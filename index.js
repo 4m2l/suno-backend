@@ -1,76 +1,53 @@
 const express = require('express');
-const axios = require('axios');
-const cors = require('cors'); // لحل مشكلة حظر المتصفحات
+const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
-app.use(express.json());
-app.use(cors()); // السماح لواجهتك بالاتصال بالخادم
-
-// 1. نقطة استلام الطلب من واجهتك (تطبيق محمود)
-app.post('/api/generate-music', async (req, res) => {
-    try {
-        // استخراج مفتاح API السري من رأس الطلب
-        const authHeader = req.headers.authorization;
-        if (!authHeader) {
-            return res.status(401).json({ error: "Missing Authorization header" });
-        }
-
-        // استخراج البيانات القادمة من الواجهة
-        const {
-            prompt,
-            tags,
-            title,
-            mv,
-            make_instrumental,
-            callback_url,
-            negative_tags 
-        } = req.body;
-
-        // دمج الكلمات المستبعدة مع الستايل لمنع خطأ 500
-        let finalTags = tags || "";
-        if (negative_tags) {
-            finalTags = `${finalTags}, avoid: ${negative_tags}`;
-        }
-
-        // بناء الطلب "النظيف" والمطابق 100% لشروط Suno
-        const sunoPayload = {
-            prompt: prompt,
-            tags: finalTags,
-            title: title,
-            mv: mv || "v5.5",
-            make_instrumental: make_instrumental || false,
-            callback_url: callback_url || ""
-        };
-
-        console.log("Sending clean payload to Suno...");
-
-        // إرسال الطلب إلى سيرفرات Suno
-        const response = await axios.post('https://api.sunoapi.org/api/v1/generate', sunoPayload, {
-            headers: {
-                'Authorization': authHeader,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        // إرجاع رد Suno الحقيقي (والذي يحتوي على Task ID) لواجهتك
-        res.status(200).json(response.data);
-
-    } catch (error) {
-        // التقاط الأخطاء بدقة وإرسالها للواجهة
-        console.error("Suno API Error:", error.response ? error.response.data : error.message);
-        res.status(error.response?.status || 500).json(error.response?.data || { error: "Internal Server Error" });
-    }
-});
-
-// 2. نقطة استلام الـ Webhook (الأغنية الجاهزة)
-app.post('/api/webhook/suno', (req, res) => {
-    console.log("Webhook received successfully:", req.body);
-    // يمكنك لاحقاً برمجة هذه النقطة لحفظ الرابط في قاعدة بيانات
-    res.status(200).send("Webhook OK");
-});
-
-// تشغيل الخادم
 const PORT = process.env.PORT || 3000;
+
+app.use(cors());
+app.use(express.json());
+
+const DB_PATH = path.join(__dirname, 'database.json');
+
+const readDB = () => {
+    if (!fs.existsSync(DB_PATH)) return [];
+    try { return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8')); } 
+    catch { return []; }
+};
+const writeDB = (data) => {
+    fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+};
+
+// نقطة استقبال الأغاني من Suno
+app.post('/webhook', (req, res) => {
+    console.log('📩 تم استقبال أغنية جديدة!');
+    const payload = req.body;
+
+    const taskId = payload.taskId || payload.id || 'unknown';
+    const audioId = payload.audioId || payload.data?.id || 'unknown';
+    const audioUrl = payload.audioUrl || payload.data?.audio_url || null;
+    const downloadUrl = payload.downloadUrl || payload.data?.download_url || null;
+    const prompt = payload.prompt || payload.data?.prompt || 'بدون وصف';
+    const title = payload.title || payload.data?.title || 'بدون عنوان';
+    const style = payload.style || payload.data?.style || '';
+
+    const db = readDB();
+    const newEntry = { taskId, audioId, audioUrl, downloadUrl, title, prompt, style, receivedAt: new Date().toISOString() };
+    
+    // نضيفها في الأعلى عشان تظهر أولاً
+    db.unshift(newEntry);
+    writeDB(db);
+    
+    res.json({ received: true });
+});
+
+// نقطة عرض الأغاني لتطبيقك
+app.get('/songs', (req, res) => {
+    res.json(readDB());
+});
+
 app.listen(PORT, () => {
-    console.log(`Mahmood's Server is running on port ${PORT}`);
+    console.log(`السيرفر شغال على المنفذ ${PORT}`);
 });

@@ -222,7 +222,7 @@ app.get('/songs-debug', (req, res) => {
     try {
         res.json({
             total: db.songs.length,
-            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status }))
+            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status, videoUrl: s.videoUrl }))
         });
     } catch (error) {
         res.status(500).json({ error: 'Failed' });
@@ -256,6 +256,7 @@ app.post('/api/songs', authMiddleware, (req, res) => {
             imageUrl: imageUrl || null,
             prompt: prompt || '',
             duration: duration || null,
+            videoUrl: null,
             status: 'success',
             isShared: false,
             likes: 0,
@@ -299,7 +300,7 @@ app.put('/api/songs/:songId', authMiddleware, (req, res) => {
         const songId = req.params.songId;
         const song = findSongById(songId);
         if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { title, style, prompt, isShared, audioUrl, downloadUrl, imageUrl, duration, status } = req.body;
+        const { title, style, prompt, isShared, audioUrl, downloadUrl, imageUrl, duration, status, videoUrl } = req.body;
         if (title) song.title = title;
         if (style) song.style = style;
         if (prompt) song.prompt = prompt;
@@ -309,6 +310,7 @@ app.put('/api/songs/:songId', authMiddleware, (req, res) => {
         if (imageUrl) song.imageUrl = imageUrl;
         if (duration) song.duration = duration;
         if (status) song.status = status;
+        if (videoUrl) song.videoUrl = videoUrl;
         song.updatedAt = new Date().toISOString();
         db.save();
         db.addAuditLog('song_updated', req.user.id, { title: song.title });
@@ -325,7 +327,7 @@ app.post('/api/songs/update/:songId', authMiddleware, (req, res) => {
         const songId = req.params.songId;
         const song = findSongById(songId);
         if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { audioUrl, downloadUrl, imageUrl, duration, status } = req.body;
+        const { audioUrl, downloadUrl, imageUrl, duration, status, videoUrl } = req.body;
         let updated = false;
         if (audioUrl && audioUrl.startsWith('https://')) {
             song.audioUrl = audioUrl;
@@ -337,6 +339,10 @@ app.post('/api/songs/update/:songId', authMiddleware, (req, res) => {
         if (imageUrl) song.imageUrl = imageUrl;
         if (duration) song.duration = duration;
         if (status) song.status = status;
+        if (videoUrl) {
+            song.videoUrl = videoUrl;
+            updated = true;
+        }
         if (updated) {
             song.updatedAt = new Date().toISOString();
             db.save();
@@ -370,6 +376,7 @@ app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
             downloadUrl: song.downloadUrl,
             imageUrl: song.imageUrl,
             duration: song.duration,
+            videoUrl: song.videoUrl,
             likes: 0,
             commentsCount: 0,
             sharedAt: new Date().toISOString()
@@ -577,7 +584,6 @@ app.post('/webhook', (req, res) => {
         let clips = [];
         let taskId = null;
 
-        // محاولة استخراج البيانات من عدة هياكل مختلفة
         if (body?.data?.data && Array.isArray(body.data.data)) {
             clips = body.data.data;
             taskId = body.data.task_id || body.task_id || null;
@@ -594,7 +600,6 @@ app.post('/webhook', (req, res) => {
             clips = body;
             console.log(`📌 [WEBHOOK] استخراج من الجسم الرئيسي (مصفوفة)`);
         } else {
-            // محاولة البحث عن أي مصفوفة داخل الكائن
             for (const key in body) {
                 if (Array.isArray(body[key])) {
                     clips = body[key];
@@ -614,7 +619,6 @@ app.post('/webhook', (req, res) => {
         let updatedCount = 0;
 
         clips.forEach((clip, index) => {
-            // محاولة استخراج الرابط من عدة حقول
             const audioUrl = clip.audio_url || clip.audioUrl || clip.url || clip.downloadUrl || clip.streamUrl || clip.audio || null;
             const imageUrl = clip.image_url || clip.imageUrl || clip.coverUrl || clip.cover_url || null;
             const title = clip.title || clip.name || clip.songName || clip.song_title || `مقطع ${index + 1}`;
@@ -623,32 +627,34 @@ app.post('/webhook', (req, res) => {
             const prompt = clip.prompt || clip.lyrics || clip.text || '';
             const audioId = clip.id || clip.audioId || clip.clip_id || clip.audio_id || `clip-${index}`;
             const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
+            const videoUrl = clip.video_url || clip.videoUrl || null;
 
             console.log(`🔄 [WEBHOOK] المقطع ${index + 1}: "${title}" - رابط: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
 
-            // البحث عن أغنية موجودة بنفس taskId و audioId
             const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
 
             if (existingSong) {
-                // تحديث الأغنية الموجودة إذا كان هناك رابط جديد
+                let updated = false;
                 if (audioUrl && audioUrl.startsWith('https://') && !existingSong.audioUrl) {
                     existingSong.audioUrl = audioUrl;
                     existingSong.downloadUrl = audioUrl;
                     existingSong.status = 'success';
+                    updated = true;
+                }
+                if (videoUrl && !existingSong.videoUrl) {
+                    existingSong.videoUrl = videoUrl;
+                    updated = true;
+                }
+                if (imageUrl) existingSong.imageUrl = imageUrl;
+                if (duration) existingSong.duration = duration;
+                if (title) existingSong.title = title;
+                if (style) existingSong.style = style;
+                if (updated) {
                     existingSong.updatedAt = new Date().toISOString();
-                    if (imageUrl) existingSong.imageUrl = imageUrl;
-                    if (duration) existingSong.duration = duration;
-                    if (title) existingSong.title = title;
-                    if (style) existingSong.style = style;
                     updatedCount++;
-                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}" بالرابط ${audioUrl}`);
-                } else if (audioUrl && audioUrl.startsWith('https://') && existingSong.audioUrl) {
-                    console.log(`⏭️ [WEBHOOK] الأغنية "${existingSong.title}" موجودة بالفعل ولها رابط`);
-                } else {
-                    console.log(`⏭️ [WEBHOOK] الأغنية "${existingSong.title}" موجودة ولكن بدون رابط جديد`);
+                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}"`);
                 }
             } else {
-                // إنشاء أغنية جديدة
                 const song = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                     userId: userId,
@@ -661,6 +667,7 @@ app.post('/webhook', (req, res) => {
                     style: style || '',
                     prompt: prompt || '',
                     duration: duration || null,
+                    videoUrl: videoUrl || null,
                     status: audioUrl ? 'success' : 'pending',
                     isShared: false,
                     likes: 0,
@@ -675,8 +682,6 @@ app.post('/webhook', (req, res) => {
                     if (user) {
                         user.totalSongs = (user.totalSongs || 0) + 1;
                         console.log(`✅ [WEBHOOK] تم تحديث عدد أغاني المستخدم ${user.username} إلى ${user.totalSongs}`);
-                    } else {
-                        console.warn(`⚠️ [WEBHOOK] المستخدم ذو المعرف ${userId} غير موجود في قاعدة البيانات!`);
                     }
                 }
                 console.log(`✅ [WEBHOOK] تم حفظ الأغنية الجديدة: "${song.title}" (الحالة: ${song.status})`);
@@ -702,7 +707,6 @@ app.post('/webhook-test', (req, res) => {
     const userId = req.query.userId || req.body.userId || null;
     console.log(`👤 [WEBHOOK-TEST] userId: ${userId}`);
 
-    // إنشاء بيانات اختبار
     const testData = {
         data: {
             data: [
@@ -712,7 +716,8 @@ app.post('/webhook-test', (req, res) => {
                     title: 'أغنية اختبار ' + new Date().toLocaleTimeString(),
                     style: 'pop, test',
                     duration: 180,
-                    image_url: 'https://via.placeholder.com/300x300/1a1a2e/ffffff?text=Test'
+                    image_url: 'https://via.placeholder.com/300x300/1a1a2e/ffffff?text=Test',
+                    video_url: 'https://example.com/test-video-' + Date.now() + '.mp4'
                 }
             ],
             task_id: 'test-task-' + Date.now()
@@ -721,13 +726,11 @@ app.post('/webhook-test', (req, res) => {
 
     console.log('📦 [WEBHOOK-TEST] بيانات الاختبار:', JSON.stringify(testData, null, 2));
 
-    // محاكاة طلب Webhook
     const mockReq = {
         body: testData,
         query: { userId: userId }
     };
 
-    // استدعاء معالج Webhook مباشرة
     const webhookHandler = app._router.stack.find(layer => layer.route && layer.route.path === '/webhook');
     if (webhookHandler) {
         req.body = mockReq.body;
@@ -739,7 +742,7 @@ app.post('/webhook-test', (req, res) => {
 });
 
 // ============================================================
-// نقطة نهاية للتحقق من حالة مهمة من Suno API (اختياري)
+// نقطة نهاية للتحقق من حالة مهمة من Suno API
 // ============================================================
 app.post('/api/songs/check-status/:taskId', authMiddleware, async (req, res) => {
     try {
@@ -747,7 +750,6 @@ app.post('/api/songs/check-status/:taskId', authMiddleware, async (req, res) => 
         const apiKey = req.body.apiKey;
         if (!apiKey) return res.status(400).json({ error: 'API Key required' });
 
-        // استدعاء Suno API للحصول على حالة المهمة
         const response = await fetch(`https://api.sunoapi.org/api/v1/generate/status?taskId=${taskId}`, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${apiKey}` }

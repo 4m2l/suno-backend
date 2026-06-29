@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// إعدادات CORS الصحيحة
+// إعدادات CORS
 // ============================================================
 app.use(cors({
     origin: '*',
@@ -19,16 +19,11 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 
 // ============================================================
-// إعدادات متقدمة
+// إعدادات
 // ============================================================
 const CONFIG = {
-    MAX_SONGS_PER_USER: 1000,
-    RATE_LIMIT_WINDOW: 60000,
-    MAX_REQUESTS_PER_WINDOW: 100,
-    CACHE_TTL: 60000,
     DATA_FILE: path.join(__dirname, 'data.json'),
-    LOG_FILE: path.join(__dirname, 'audit.log'),
-    USERS_FILE: path.join(__dirname, 'users.json')
+    MAX_SONGS_PER_USER: 1000
 };
 
 // ============================================================
@@ -37,14 +32,10 @@ const CONFIG = {
 class Database {
     constructor() {
         this.data = {
-            songs: [],
             users: [],
-            auditLogs: [],
-            analytics: {
-                totalRequests: 0,
-                uniqueIps: new Set(),
-                hourlyStats: {}
-            }
+            songs: [],
+            sharedSongs: [],
+            auditLogs: []
         };
         this.load();
     }
@@ -53,11 +44,7 @@ class Database {
         try {
             if (fs.existsSync(CONFIG.DATA_FILE)) {
                 const raw = fs.readFileSync(CONFIG.DATA_FILE, 'utf8');
-                const loaded = JSON.parse(raw);
-                if (loaded.analytics) {
-                    loaded.analytics.uniqueIps = new Set(loaded.analytics.uniqueIps || []);
-                }
-                this.data = loaded;
+                this.data = JSON.parse(raw);
                 console.log('📂 تم تحميل البيانات من الملف');
             }
         } catch (e) {
@@ -67,30 +54,23 @@ class Database {
 
     save() {
         try {
-            const toSave = {
-                ...this.data,
-                analytics: {
-                    ...this.data.analytics,
-                    uniqueIps: Array.from(this.data.analytics.uniqueIps || [])
-                }
-            };
-            fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(toSave, null, 2));
+            fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(this.data, null, 2));
         } catch (e) {
             console.error('❌ خطأ في حفظ البيانات:', e.message);
         }
     }
 
-    get songs() { return this.data.songs; }
-    set songs(val) { this.data.songs = val; this.save(); }
-
     get users() { return this.data.users; }
     set users(val) { this.data.users = val; this.save(); }
 
+    get songs() { return this.data.songs; }
+    set songs(val) { this.data.songs = val; this.save(); }
+
+    get sharedSongs() { return this.data.sharedSongs; }
+    set sharedSongs(val) { this.data.sharedSongs = val; this.save(); }
+
     get auditLogs() { return this.data.auditLogs; }
     set auditLogs(val) { this.data.auditLogs = val; this.save(); }
-
-    get analytics() { return this.data.analytics; }
-    set analytics(val) { this.data.analytics = val; this.save(); }
 
     addAuditLog(action, userId, details) {
         this.auditLogs.push({
@@ -98,23 +78,11 @@ class Database {
             userId: userId || 'system',
             action: action,
             details: details,
-            timestamp: new Date().toISOString(),
-            ip: details?.ip || 'unknown'
+            timestamp: new Date().toISOString()
         });
         if (this.auditLogs.length > 1000) {
             this.auditLogs = this.auditLogs.slice(-1000);
         }
-        this.save();
-    }
-
-    trackRequest(ip) {
-        this.analytics.totalRequests++;
-        this.analytics.uniqueIps.add(ip);
-        const hour = new Date().toISOString().slice(0, 13);
-        if (!this.analytics.hourlyStats[hour]) {
-            this.analytics.hourlyStats[hour] = 0;
-        }
-        this.analytics.hourlyStats[hour]++;
         this.save();
     }
 }
@@ -127,7 +95,7 @@ if (!db.users.find(u => u.username === 'admin')) {
         id: 'admin-' + crypto.randomBytes(4).toString('hex'),
         username: 'admin',
         email: 'admin@example.com',
-        apiKey: 'sk-' + crypto.randomBytes(32).toString('hex'),
+        password: crypto.createHash('sha256').update('admin123').digest('hex'),
         credits: 9999,
         createdAt: new Date().toISOString(),
         totalSongs: 0,
@@ -137,62 +105,36 @@ if (!db.users.find(u => u.username === 'admin')) {
     db.users.push(admin);
     db.save();
     console.log('👑 تم إنشاء مستخدم Admin:');
-    console.log(`   📧 Email: ${admin.email}`);
-    console.log(`   🔑 API Key: ${admin.apiKey}`);
+    console.log(`   📧 Email: admin@example.com`);
+    console.log(`   🔑 Password: admin123`);
 }
 
 // ============================================================
-// نظام Rate Limiting
+// دوال مساعدة
 // ============================================================
-class RateLimiter {
-    constructor() {
-        this.requests = new Map();
-    }
-
-    check(ip) {
-        const now = Date.now();
-        const windowStart = now - CONFIG.RATE_LIMIT_WINDOW;
-
-        if (this.requests.has(ip)) {
-            const requests = this.requests.get(ip).filter(time => time > windowStart);
-            this.requests.set(ip, requests);
-        }
-
-        const currentRequests = this.requests.get(ip) || [];
-        if (currentRequests.length >= CONFIG.MAX_REQUESTS_PER_WINDOW) {
-            return { allowed: false, remaining: 0, resetIn: CONFIG.RATE_LIMIT_WINDOW - (now - currentRequests[0]) };
-        }
-
-        currentRequests.push(now);
-        this.requests.set(ip, currentRequests);
-        const remaining = CONFIG.MAX_REQUESTS_PER_WINDOW - currentRequests.length;
-        const resetIn = CONFIG.RATE_LIMIT_WINDOW - (now - currentRequests[0]);
-
-        return { allowed: true, remaining, resetIn: Math.max(0, resetIn) };
-    }
+function hashPassword(password) {
+    return crypto.createHash('sha256').update(password).digest('hex');
 }
 
-const rateLimiter = new RateLimiter();
-
-function rateLimitMiddleware(req, res, next) {
-    const ip = req.ip || req.connection.remoteAddress || 'unknown';
-    const result = rateLimiter.check(ip);
-
-    res.setHeader('X-RateLimit-Limit', CONFIG.MAX_REQUESTS_PER_WINDOW);
-    res.setHeader('X-RateLimit-Remaining', result.remaining);
-    res.setHeader('X-RateLimit-Reset', Math.ceil(result.resetIn / 1000));
-
-    if (!result.allowed) {
-        return res.status(429).json({
-            error: 'Too many requests',
-            retryAfter: Math.ceil(result.resetIn / 1000),
-            message: 'Please wait before making more requests'
-        });
-    }
-
-    next();
+function generateToken() {
+    return 'sk-' + crypto.randomBytes(32).toString('hex');
 }
 
+function findUserByEmail(email) {
+    return db.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+}
+
+function findUserById(id) {
+    return db.users.find(u => u.id === id);
+}
+
+function findUserByToken(token) {
+    return db.users.find(u => u.apiKey === token);
+}
+
+// ============================================================
+// Middleware للمصادقة
+// ============================================================
 function authMiddleware(req, res, next) {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -200,10 +142,10 @@ function authMiddleware(req, res, next) {
     }
 
     const token = authHeader.substring(7);
-    const user = db.users.find(u => u.apiKey === token);
+    const user = findUserByToken(token);
 
     if (!user) {
-        return res.status(403).json({ error: 'Invalid API key' });
+        return res.status(403).json({ error: 'Invalid token' });
     }
 
     req.user = user;
@@ -211,562 +153,487 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// نظام Cache
+// نقاط نهاية المستخدمين
 // ============================================================
-class Cache {
-    constructor() {
-        this.cache = new Map();
-    }
 
-    get(key) {
-        const item = this.cache.get(key);
-        if (!item) return null;
-        if (Date.now() > item.expires) {
-            this.cache.delete(key);
-            return null;
+// 1. تسجيل الدخول (بالبريد الإلكتروني وكلمة المرور)
+app.post('/api/auth/login', (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password are required' });
         }
-        return item.value;
-    }
 
-    set(key, value, ttl = CONFIG.CACHE_TTL) {
-        this.cache.set(key, {
-            value: value,
-            expires: Date.now() + ttl
-        });
-    }
+        const user = findUserByEmail(email);
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
 
-    clear() {
-        this.cache.clear();
-    }
+        const hashedPassword = hashPassword(password);
+        if (user.password !== hashedPassword) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
 
-    invalidate(prefix) {
-        for (const key of this.cache.keys()) {
-            if (key.startsWith(prefix)) {
-                this.cache.delete(key);
+        // إنشاء توكن جديد
+        const token = generateToken();
+        user.apiKey = token;
+        user.lastLogin = new Date().toISOString();
+        db.save();
+
+        db.addAuditLog('user_login', user.id, { email: user.email });
+
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                credits: user.credits,
+                totalSongs: user.totalSongs || 0,
+                apiKey: token
             }
-        }
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Login failed' });
     }
-}
-
-const cache = new Cache();
-
-// ============================================================
-// نقاط النهاية العامة
-// ============================================================
-app.use(rateLimitMiddleware);
-
-// 1. فحص الصحة
-app.get('/healthz', (req, res) => {
-    db.trackRequest(req.ip || 'unknown');
-    res.status(200).json({
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        songsCount: db.songs.length,
-        usersCount: db.users.length,
-        uptime: process.uptime(),
-        memory: process.memoryUsage()
-    });
 });
 
-// ============================================================
-// نقاط نهاية المستخدمين (مع إصلاح CORS)
-// ============================================================
-
-// 2. إنشاء مستخدم جديد
-app.post('/api/users', (req, res) => {
-    console.log('📝 محاولة إنشاء مستخدم:', req.body);
+// 2. إنشاء حساب جديد
+app.post('/api/auth/register', (req, res) => {
     try {
-        const { username, email } = req.body;
+        const { username, email, password } = req.body;
 
-        if (!username || !email) {
-            return res.status(400).json({
-                error: 'Username and email are required'
-            });
+        if (!username || !email || !password) {
+            return res.status(400).json({ error: 'Username, email and password are required' });
         }
 
-        // التحقق من عدم تكرار البريد
-        if (db.users.find(u => u.email === email)) {
-            return res.status(409).json({
-                error: 'Email already exists'
-            });
+        if (password.length < 6) {
+            return res.status(400).json({ error: 'Password must be at least 6 characters' });
+        }
+
+        if (findUserByEmail(email)) {
+            return res.status(409).json({ error: 'Email already exists' });
         }
 
         const newUser = {
             id: 'user-' + Date.now(),
             username: username,
-            email: email,
-            apiKey: 'sk-' + crypto.randomBytes(32).toString('hex'),
+            email: email.toLowerCase(),
+            password: hashPassword(password),
+            apiKey: generateToken(),
             credits: 50,
             createdAt: new Date().toISOString(),
             totalSongs: 0,
-            isActive: true
+            isActive: true,
+            role: 'user'
         };
 
         db.users.push(newUser);
         db.save();
-
-        console.log('✅ تم إنشاء مستخدم:', username);
-        console.log(`   🔑 API Key: ${newUser.apiKey}`);
+        db.addAuditLog('user_registered', newUser.id, { email: newUser.email });
 
         res.status(201).json({
-            message: 'User created successfully',
+            success: true,
+            message: 'Account created successfully',
             user: {
                 id: newUser.id,
                 username: newUser.username,
                 email: newUser.email,
-                apiKey: newUser.apiKey,
-                credits: newUser.credits
+                credits: newUser.credits,
+                apiKey: newUser.apiKey
             }
         });
     } catch (error) {
-        console.error('❌ Error creating user:', error);
-        res.status(500).json({ error: 'Failed to create user: ' + error.message });
+        console.error('Register error:', error);
+        res.status(500).json({ error: 'Registration failed' });
     }
 });
 
 // 3. الحصول على معلومات المستخدم الحالي
-app.get('/api/users/me', (req, res) => {
+app.get('/api/users/me', authMiddleware, (req, res) => {
+    const user = req.user;
+    res.json({
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        credits: user.credits,
+        totalSongs: user.totalSongs || 0,
+        createdAt: user.createdAt
+    });
+});
+
+// 4. تحديث معلومات المستخدم
+app.put('/api/users/me', authMiddleware, (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        console.log('🔐 طلب معلومات المستخدم:', authHeader ? 'Headers present' : 'No auth');
+        const user = req.user;
+        const { username, password } = req.body;
 
-        if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            return res.status(401).json({ error: 'Authentication required' });
+        if (username) user.username = username;
+        if (password) {
+            if (password.length < 6) {
+                return res.status(400).json({ error: 'Password must be at least 6 characters' });
+            }
+            user.password = hashPassword(password);
         }
 
-        const token = authHeader.substring(7);
-        const user = db.users.find(u => u.apiKey === token);
-
-        if (!user) {
-            return res.status(403).json({ error: 'Invalid API key' });
-        }
+        db.save();
+        db.addAuditLog('user_updated', user.id, { username: user.username });
 
         res.json({
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            credits: user.credits,
-            totalSongs: user.totalSongs || 0,
-            createdAt: user.createdAt
-        });
-    } catch (error) {
-        console.error('❌ Error getting user:', error);
-        res.status(500).json({ error: 'Server error: ' + error.message });
-    }
-});
-
-// 4. جلب جميع المستخدمين (للمشرفين فقط)
-app.get('/api/users', authMiddleware, (req, res) => {
-    try {
-        if (req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
-        }
-        res.status(200).json(db.users);
-    } catch (error) {
-        res.status(500).json({ error: 'Server error' });
-    }
-});
-
-// ============================================================
-// نقاط نهاية الأغاني
-// ============================================================
-
-// 5. جلب الأغاني
-app.get('/songs', (req, res) => {
-    try {
-        db.trackRequest(req.ip || 'unknown');
-
-        const cacheKey = 'songs_' + JSON.stringify(req.query);
-        const cached = cache.get(cacheKey);
-        if (cached) {
-            return res.status(200).json({
-                ...cached,
-                fromCache: true
-            });
-        }
-
-        let result = [...db.songs];
-
-        if (req.query.userId) {
-            result = result.filter(s => s.userId === req.query.userId);
-        }
-        if (req.query.title) {
-            const title = req.query.title.toLowerCase();
-            result = result.filter(s => s.title && s.title.toLowerCase().includes(title));
-        }
-        if (req.query.style) {
-            const style = req.query.style.toLowerCase();
-            result = result.filter(s => s.style && s.style.toLowerCase().includes(style));
-        }
-        if (req.query.type) {
-            result = result.filter(s => s.type === req.query.type);
-        }
-        if (req.query.status) {
-            result = result.filter(s => s.status === req.query.status);
-        }
-        if (req.query.fromDate) {
-            const from = new Date(req.query.fromDate);
-            result = result.filter(s => new Date(s.receivedAt) >= from);
-        }
-        if (req.query.toDate) {
-            const to = new Date(req.query.toDate);
-            result = result.filter(s => new Date(s.receivedAt) <= to);
-        }
-        if (req.query.search) {
-            const search = req.query.search.toLowerCase();
-            result = result.filter(s =>
-                (s.title && s.title.toLowerCase().includes(search)) ||
-                (s.style && s.style.toLowerCase().includes(search)) ||
-                (s.prompt && s.prompt.toLowerCase().includes(search)) ||
-                (s.tags && s.tags.toLowerCase().includes(search))
-            );
-        }
-
-        const sortBy = req.query.sortBy || 'receivedAt';
-        const sortOrder = req.query.sortOrder || 'desc';
-        result.sort((a, b) => {
-            const aVal = a[sortBy] || '';
-            const bVal = b[sortBy] || '';
-            if (sortOrder === 'asc') {
-                return aVal > bVal ? 1 : -1;
-            } else {
-                return aVal < bVal ? 1 : -1;
+            success: true,
+            message: 'Profile updated successfully',
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                credits: user.credits
             }
         });
+    } catch (error) {
+        console.error('Update error:', error);
+        res.status(500).json({ error: 'Update failed' });
+    }
+});
 
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 50;
-        const startIndex = (page - 1) * limit;
-        const endIndex = startIndex + limit;
-        const paginated = result.slice(startIndex, endIndex);
+// 5. تسجيل الخروج
+app.post('/api/auth/logout', authMiddleware, (req, res) => {
+    try {
+        const user = req.user;
+        user.apiKey = null;
+        db.save();
+        db.addAuditLog('user_logout', user.id, { email: user.email });
+        res.json({ success: true, message: 'Logged out successfully' });
+    } catch (error) {
+        res.status(500).json({ error: 'Logout failed' });
+    }
+});
 
-        const response = {
-            total: result.length,
-            page: page,
-            limit: limit,
-            totalPages: Math.ceil(result.length / limit),
-            data: paginated
-        };
+// ============================================================
+// نقاط نهاية الأغاني (خاصة بكل مستخدم)
+// ============================================================
 
-        cache.set(cacheKey, response, 30000);
-        res.status(200).json(response);
+// 6. جلب أغاني المستخدم
+app.get('/api/songs', authMiddleware, (req, res) => {
+    try {
+        const userSongs = db.songs.filter(s => s.userId === req.user.id);
+        res.json({
+            total: userSongs.length,
+            data: userSongs
+        });
     } catch (error) {
         console.error('Error fetching songs:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Failed to fetch songs' });
     }
 });
 
-// 6. جلب أغنية واحدة
-app.get('/songs/:taskId', (req, res) => {
+// 7. إضافة أغنية جديدة
+app.post('/api/songs', authMiddleware, (req, res) => {
     try {
-        db.trackRequest(req.ip || 'unknown');
-        const song = db.songs.find(s => s.taskId === req.params.taskId);
-        if (!song) {
-            return res.status(404).json({ error: 'Song not found' });
-        }
-        res.status(200).json(song);
-    } catch (error) {
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
+        const { title, style, audioUrl, downloadUrl, imageUrl, prompt, duration, credits } = req.body;
 
-// 7. تحديث أغنية
-app.put('/songs/:taskId', authMiddleware, (req, res) => {
-    try {
-        const taskId = req.params.taskId;
-        const song = db.songs.find(s => s.taskId === taskId);
-
-        if (!song) {
-            return res.status(404).json({ error: 'Song not found' });
+        if (!title || !audioUrl) {
+            return res.status(400).json({ error: 'Title and audio URL are required' });
         }
 
-        if (song.userId && song.userId !== req.user.id) {
-            return res.status(403).json({ error: 'Access denied' });
-        }
+        const song = {
+            id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+            userId: req.user.id,
+            taskId: 'task-' + Date.now(),
+            audioId: 'audio-' + Date.now(),
+            title: title,
+            style: style || '',
+            audioUrl: audioUrl,
+            downloadUrl: downloadUrl || audioUrl,
+            imageUrl: imageUrl || null,
+            prompt: prompt || '',
+            duration: duration || null,
+            credits: credits || 12,
+            status: 'success',
+            isShared: false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
 
-        const allowedFields = ['title', 'style', 'status', 'tags', 'prompt', 'credits'];
-        let updated = false;
+        db.songs.push(song);
+        req.user.totalSongs = (req.user.totalSongs || 0) + 1;
+        req.user.credits = (req.user.credits || 0) - (credits || 12);
+        db.save();
+        db.addAuditLog('song_created', req.user.id, { title: song.title });
 
-        allowedFields.forEach(field => {
-            if (req.body[field] !== undefined && req.body[field] !== null) {
-                song[field] = req.body[field];
-                updated = true;
-            }
+        res.status(201).json({
+            success: true,
+            song: song
         });
-
-        if (updated) {
-            song.updatedAt = new Date().toISOString();
-            song.updatedBy = req.user.id;
-
-            db.save();
-            cache.invalidate('songs_');
-            db.addAuditLog('song_updated', req.user.id, {
-                taskId,
-                fields: Object.keys(req.body).filter(f => allowedFields.includes(f))
-            });
-
-            res.status(200).json({
-                message: 'Song updated successfully',
-                song: song
-            });
-        } else {
-            res.status(400).json({ error: 'No fields to update' });
-        }
     } catch (error) {
-        console.error('Error updating song:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Error creating song:', error);
+        res.status(500).json({ error: 'Failed to create song' });
     }
 });
 
 // 8. حذف أغنية
-app.delete('/songs/:taskId', authMiddleware, (req, res) => {
+app.delete('/api/songs/:songId', authMiddleware, (req, res) => {
     try {
-        const taskId = req.params.taskId;
-        const index = db.songs.findIndex(s => s.taskId === taskId);
+        const songId = req.params.songId;
+        const index = db.songs.findIndex(s => s.id === songId && s.userId === req.user.id);
 
         if (index === -1) {
             return res.status(404).json({ error: 'Song not found' });
         }
 
-        const song = db.songs[index];
-
-        if (song.userId && song.userId !== req.user.id) {
-            return res.status(403).json({ error: 'Access denied' });
-        }
-
-        db.songs.splice(index, 1);
+        const deleted = db.songs.splice(index, 1)[0];
+        req.user.totalSongs = (req.user.totalSongs || 1) - 1;
         db.save();
-        cache.invalidate('songs_');
-        db.addAuditLog('song_deleted', req.user.id, { taskId, title: song.title });
+        db.addAuditLog('song_deleted', req.user.id, { title: deleted.title });
 
-        res.status(200).json({
-            message: 'Song deleted successfully',
-            deleted: { taskId: song.taskId, title: song.title }
+        // حذف من المشاركات
+        db.sharedSongs = db.sharedSongs.filter(s => s.songId !== songId);
+        db.save();
+
+        res.json({
+            success: true,
+            message: 'Song deleted successfully'
         });
     } catch (error) {
         console.error('Error deleting song:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        res.status(500).json({ error: 'Failed to delete song' });
     }
 });
 
-// 9. حذف كل الأغاني
-app.delete('/songs', authMiddleware, (req, res) => {
+// 9. تحديث أغنية
+app.put('/api/songs/:songId', authMiddleware, (req, res) => {
     try {
-        if (req.query.confirm !== 'yes') {
-            return res.status(400).json({
-                error: 'Confirmation required. Add ?confirm=yes to proceed'
-            });
+        const songId = req.params.songId;
+        const song = db.songs.find(s => s.id === songId && s.userId === req.user.id);
+
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
         }
 
-        const count = db.songs.length;
-        db.songs = [];
-        db.save();
-        cache.invalidate('songs_');
-        db.addAuditLog('all_songs_deleted', req.user.id, { count });
+        const { title, style, prompt, isShared } = req.body;
+        if (title) song.title = title;
+        if (style) song.style = style;
+        if (prompt) song.prompt = prompt;
+        if (isShared !== undefined) song.isShared = isShared;
+        song.updatedAt = new Date().toISOString();
 
-        res.status(200).json({
-            message: `All ${count} songs deleted successfully`,
-            deletedCount: count
+        db.save();
+        db.addAuditLog('song_updated', req.user.id, { title: song.title });
+
+        res.json({
+            success: true,
+            song: song
         });
     } catch (error) {
-        console.error('Error deleting all songs:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Error updating song:', error);
+        res.status(500).json({ error: 'Failed to update song' });
     }
 });
 
-// 10. الإحصائيات المتقدمة
-app.get('/stats', (req, res) => {
+// 10. مشاركة أغنية
+app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
     try {
-        db.trackRequest(req.ip || 'unknown');
-        const songs = db.songs;
-        const total = songs.length;
+        const songId = req.params.songId;
+        const song = db.songs.find(s => s.id === songId && s.userId === req.user.id);
 
-        const stats = {
-            total: total,
-            byType: {
-                music: songs.filter(s => s.type === 'music').length,
-                video: songs.filter(s => s.type === 'video').length
-            },
-            byStatus: {
-                success: songs.filter(s => s.status === 'success').length,
-                pending: songs.filter(s => s.status === 'pending').length,
-                error: songs.filter(s => s.status === 'error').length
-            },
-            credits: {
-                total: songs.reduce((sum, s) => sum + (s.credits || 0), 0),
-                average: songs.length > 0 ? songs.reduce((sum, s) => sum + (s.credits || 0), 0) / songs.length : 0
-            },
-            duration: {
-                total: songs.reduce((sum, s) => sum + (s.duration || 0), 0),
-                average: songs.filter(s => s.duration).length > 0 ?
-                    songs.filter(s => s.duration).reduce((sum, s) => sum + (s.duration || 0), 0) / songs.filter(s => s.duration).length :
-                    0,
-                min: songs.filter(s => s.duration).length > 0 ?
-                    Math.min(...songs.filter(s => s.duration).map(s => s.duration)) :
-                    0,
-                max: songs.filter(s => s.duration).length > 0 ?
-                    Math.max(...songs.filter(s => s.duration).map(s => s.duration)) :
-                    0
-            },
-            topStyles: (() => {
-                const styleCount = {};
-                songs.forEach(s => {
-                    if (s.style) {
-                        const styles = s.style.split(',').map(st => st.trim());
-                        styles.forEach(st => {
-                            if (st) styleCount[st] = (styleCount[st] || 0) + 1;
-                        });
-                    }
-                });
-                return Object.entries(styleCount)
-                    .sort((a, b) => b[1] - a[1])
-                    .slice(0, 10)
-                    .map(([style, count]) => ({ style, count }));
-            })(),
-            timeline: (() => {
-                const timeline = {};
-                songs.forEach(s => {
-                    const date = s.receivedAt ? new Date(s.receivedAt).toISOString().slice(0, 10) : 'unknown';
-                    timeline[date] = (timeline[date] || 0) + 1;
-                });
-                return Object.entries(timeline)
-                    .sort((a, b) => a[0].localeCompare(b[0]))
-                    .slice(-30)
-                    .map(([date, count]) => ({ date, count }));
-            })(),
-            users: {
-                total: db.users.length,
-                active: db.users.filter(u => u.isActive).length,
-                totalSongs: db.users.reduce((sum, u) => sum + (u.totalSongs || 0), 0)
-            },
-            analytics: {
-                totalRequests: db.analytics.totalRequests,
-                uniqueIps: db.analytics.uniqueIps.size,
-                requestsPerHour: Object.entries(db.analytics.hourlyStats || {})
-                    .sort((a, b) => a[0].localeCompare(b[0]))
-                    .slice(-24)
-                    .map(([hour, count]) => ({ hour, count }))
-            }
+        if (!song) {
+            return res.status(404).json({ error: 'Song not found' });
+        }
+
+        const shared = {
+            id: 'shared-' + Date.now(),
+            songId: song.id,
+            userId: req.user.id,
+            username: req.user.username,
+            title: song.title,
+            style: song.style,
+            audioUrl: song.audioUrl,
+            downloadUrl: song.downloadUrl,
+            imageUrl: song.imageUrl,
+            duration: song.duration,
+            sharedAt: new Date().toISOString()
         };
 
-        res.status(200).json(stats);
+        // تجنب التكرار
+        const existing = db.sharedSongs.findIndex(s => s.songId === songId);
+        if (existing === -1) {
+            db.sharedSongs.push(shared);
+            song.isShared = true;
+            db.save();
+            db.addAuditLog('song_shared', req.user.id, { title: song.title });
+        }
+
+        res.json({
+            success: true,
+            shared: shared
+        });
     } catch (error) {
-        console.error('Error fetching stats:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Error sharing song:', error);
+        res.status(500).json({ error: 'Failed to share song' });
     }
 });
 
-// 11. تصدير البيانات
-app.get('/export', (req, res) => {
+// 11. إلغاء مشاركة أغنية
+app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
     try {
-        db.trackRequest(req.ip || 'unknown');
-        const format = req.query.format || 'json';
-        const userId = req.query.userId;
+        const songId = req.params.songId;
+        const song = db.songs.find(s => s.id === songId && s.userId === req.user.id);
 
-        let data = db.songs;
-        if (userId) {
-            data = data.filter(s => s.userId === userId);
+        if (song) {
+            song.isShared = false;
         }
+
+        db.sharedSongs = db.sharedSongs.filter(s => s.songId !== songId);
+        db.save();
+        db.addAuditLog('song_unshared', req.user.id, { songId });
+
+        res.json({
+            success: true,
+            message: 'Song unshared successfully'
+        });
+    } catch (error) {
+        console.error('Error unsharing song:', error);
+        res.status(500).json({ error: 'Failed to unshare song' });
+    }
+});
+
+// 12. جلب الأغاني المشتركة (لجميع المستخدمين)
+app.get('/api/shared-songs', (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 50;
+        const shared = db.sharedSongs
+            .sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt))
+            .slice(0, limit);
+
+        res.json({
+            total: db.sharedSongs.length,
+            data: shared
+        });
+    } catch (error) {
+        console.error('Error fetching shared songs:', error);
+        res.status(500).json({ error: 'Failed to fetch shared songs' });
+    }
+});
+
+// 13. جلب أغاني مستخدم معين (للبروفايل)
+app.get('/api/users/:userId/songs', (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const user = findUserById(userId);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        const userSongs = db.songs.filter(s => s.userId === userId && s.isShared === true);
+        res.json({
+            username: user.username,
+            total: userSongs.length,
+            data: userSongs
+        });
+    } catch (error) {
+        console.error('Error fetching user songs:', error);
+        res.status(500).json({ error: 'Failed to fetch user songs' });
+    }
+});
+
+// 14. الإحصائيات الشخصية
+app.get('/api/stats', authMiddleware, (req, res) => {
+    try {
+        const userSongs = db.songs.filter(s => s.userId === req.user.id);
+        const total = userSongs.length;
+        const sharedCount = userSongs.filter(s => s.isShared).length;
+
+        // حساب الرصيد المستهلك
+        const creditsUsed = userSongs.reduce((sum, s) => sum + (s.credits || 0), 0);
+
+        // الأنماط الأكثر استخداماً
+        const styleCount = {};
+        userSongs.forEach(s => {
+            if (s.style) {
+                const styles = s.style.split(',').map(st => st.trim());
+                styles.forEach(st => {
+                    if (st) styleCount[st] = (styleCount[st] || 0) + 1;
+                });
+            }
+        });
+
+        const topStyles = Object.entries(styleCount)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 5)
+            .map(([style, count]) => ({ style, count }));
+
+        res.json({
+            totalSongs: total,
+            sharedSongs: sharedCount,
+            creditsUsed: creditsUsed,
+            creditsRemaining: req.user.credits || 0,
+            topStyles: topStyles,
+            averageDuration: userSongs
+                .filter(s => s.duration)
+                .reduce((sum, s) => sum + (s.duration || 0), 0) / (userSongs.filter(s => s.duration).length || 1)
+        });
+    } catch (error) {
+        console.error('Error fetching stats:', error);
+        res.status(500).json({ error: 'Failed to fetch stats' });
+    }
+});
+
+// 15. تصدير أغاني المستخدم
+app.get('/api/export', authMiddleware, (req, res) => {
+    try {
+        const format = req.query.format || 'json';
+        const userSongs = db.songs.filter(s => s.userId === req.user.id);
 
         if (format === 'json') {
             res.setHeader('Content-Type', 'application/json');
             res.setHeader('Content-Disposition', `attachment; filename=songs-${Date.now()}.json`);
-            return res.status(200).json(data);
+            return res.json(userSongs);
         }
 
         if (format === 'csv') {
-            const headers = ['taskId', 'title', 'style', 'status', 'type', 'credits', 'duration', 'receivedAt'];
-            const csvRows = [headers.join(',')];
-
-            data.forEach(s => {
+            const headers = ['title', 'style', 'duration', 'credits', 'createdAt'];
+            const rows = [headers.join(',')];
+            userSongs.forEach(s => {
                 const row = headers.map(h => {
-                    let value = s[h] || '';
-                    if (typeof value === 'string' && value.includes(',')) {
-                        value = `"${value}"`;
-                    }
-                    return value;
+                    let val = s[h] || '';
+                    if (typeof val === 'string' && val.includes(',')) val = `"${val}"`;
+                    return val;
                 });
-                csvRows.push(row.join(','));
+                rows.push(row.join(','));
             });
 
             res.setHeader('Content-Type', 'text/csv');
             res.setHeader('Content-Disposition', `attachment; filename=songs-${Date.now()}.csv`);
-            return res.status(200).send(csvRows.join('\n'));
+            return res.send(rows.join('\n'));
         }
 
-        if (format === 'json-pretty') {
-            res.setHeader('Content-Type', 'application/json');
-            res.setHeader('Content-Disposition', `attachment; filename=songs-${Date.now()}.json`);
-            return res.status(200).send(JSON.stringify(data, null, 2));
-        }
-
-        res.status(400).json({ error: 'Invalid format. Use json, json-pretty, or csv' });
+        res.status(400).json({ error: 'Invalid format' });
     } catch (error) {
-        console.error('Error exporting:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// 12. سجل العمليات
-app.get('/audit', authMiddleware, (req, res) => {
-    try {
-        const limit = parseInt(req.query.limit) || 50;
-        const logs = db.auditLogs.slice(-limit).reverse();
-        res.status(200).json(logs);
-    } catch (error) {
-        console.error('Error fetching audit logs:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// 13. إعادة ضبط الخادم
-app.post('/reset', authMiddleware, (req, res) => {
-    try {
-        if (req.query.confirm !== 'yes') {
-            return res.status(400).json({
-                error: 'Confirmation required. Add ?confirm=yes to proceed'
-            });
-        }
-
-        if (req.user.username !== 'admin') {
-            return res.status(403).json({ error: 'Admin access required' });
-        }
-
-        const count = db.songs.length;
-        db.songs = [];
-        db.save();
-        cache.invalidate('songs_');
-        db.addAuditLog('server_reset', req.user.id, { count });
-
-        res.status(200).json({
-            message: 'Database reset successfully',
-            deletedCount: count
-        });
-    } catch (error) {
-        console.error('Error resetting:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('Export error:', error);
+        res.status(500).json({ error: 'Export failed' });
     }
 });
 
 // ============================================================
-// Webhook
+// Webhook (للاستقبال من Suno API)
 // ============================================================
 app.post('/webhook', (req, res) => {
-    console.log('=== Webhook received ===');
-    console.log('Body:', JSON.stringify(req.body, null, 2));
+    console.log('📨 Webhook received:', req.body);
 
     try {
         const body = req.body;
-        let savedCount = 0;
-        let userId = req.headers['x-user-id'] || null;
+        const userId = req.headers['x-user-id'] || null;
 
         if (body?.data?.data && Array.isArray(body.data.data)) {
             const taskId = body.data.task_id || body.task_id || null;
             const clips = body.data.data;
 
+            let savedCount = 0;
             clips.forEach((clip, index) => {
                 const song = {
-                    type: 'music',
+                    id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                    userId: userId,
                     taskId: taskId || `unknown-${Date.now()}`,
                     audioId: clip.id || clip.audioId || `clip-${index}`,
                     audioUrl: clip.audio_url || clip.audioUrl || null,
@@ -775,19 +642,15 @@ app.post('/webhook', (req, res) => {
                     title: clip.title || clip.name || 'بدون عنوان',
                     style: clip.tags || clip.style || clip.genre || '',
                     prompt: clip.prompt || clip.lyrics || '',
-                    status: 'success',
-                    receivedAt: new Date().toISOString(),
                     duration: clip.duration || null,
-                    modelName: clip.model_name || clip.model || null,
-                    sourceAudioUrl: clip.source_audio_url || clip.sourceAudioUrl || null,
-                    sourceImageUrl: clip.source_image_url || clip.sourceImageUrl || null,
-                    tags: clip.tags || null,
                     credits: 12,
-                    userId: userId,
-                    createdAt: new Date().toISOString()
+                    status: 'success',
+                    isShared: false,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
                 };
 
-                if (song.audioUrl || song.audioId) {
+                if (song.audioUrl) {
                     const exists = db.songs.some(s =>
                         s.taskId === song.taskId && s.audioId === song.audioId
                     );
@@ -795,23 +658,19 @@ app.post('/webhook', (req, res) => {
                         db.songs.push(song);
                         savedCount++;
                         if (userId) {
-                            const user = db.users.find(u => u.id === userId);
+                            const user = findUserById(userId);
                             if (user) {
                                 user.totalSongs = (user.totalSongs || 0) + 1;
                                 user.credits = (user.credits || 0) - 12;
                             }
                         }
-                        console.log(`✅ تم حفظ الأغنية: ${song.title} (${song.audioId})`);
+                        console.log(`✅ تم حفظ الأغنية: ${song.title}`);
                     }
                 }
             });
 
             db.save();
-            cache.invalidate('songs_');
-            db.addAuditLog('webhook_received', userId || 'system', {
-                count: savedCount,
-                taskId: taskId
-            });
+            db.addAuditLog('webhook_received', userId || 'system', { count: savedCount });
 
             return res.status(200).json({
                 received: true,
@@ -820,59 +679,24 @@ app.post('/webhook', (req, res) => {
             });
         }
 
-        if (body?.data?.video_url) {
-            const taskId = body.data.task_id || body.task_id || null;
-            const video = {
-                type: 'video',
-                taskId: taskId || `video-${Date.now()}`,
-                videoUrl: body.data.video_url || null,
-                audioId: null,
-                audioUrl: null,
-                downloadUrl: body.data.video_url || null,
-                imageUrl: null,
-                title: '🎬 فيديو',
-                style: '',
-                prompt: '',
-                status: 'success',
-                receivedAt: new Date().toISOString(),
-                credits: 0,
-                duration: null,
-                modelName: null,
-                userId: userId,
-                createdAt: new Date().toISOString()
-            };
-
-            if (video.videoUrl) {
-                const exists = db.songs.some(s => s.taskId === video.taskId);
-                if (!exists) {
-                    db.songs.push(video);
-                    savedCount++;
-                    if (userId) {
-                        const user = db.users.find(u => u.id === userId);
-                        if (user) user.totalSongs = (user.totalSongs || 0) + 1;
-                    }
-                }
-            }
-
-            db.save();
-            cache.invalidate('songs_');
-            return res.status(200).json({
-                received: true,
-                saved: savedCount,
-                total: db.songs.length
-            });
-        }
-
-        console.log('⚠️ تنسيق webhook غير معروف:', body);
-        res.status(200).json({
-            received: true,
-            message: 'Unknown format, acknowledged'
-        });
-
+        res.status(200).json({ received: true, message: 'Acknowledged' });
     } catch (error) {
-        console.error('❌ خطأ في معالجة webhook:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('❌ Webhook error:', error);
+        res.status(500).json({ error: 'Webhook processing failed' });
     }
+});
+
+// ============================================================
+// فحص الصحة
+// ============================================================
+app.get('/healthz', (req, res) => {
+    res.status(200).json({
+        status: 'OK',
+        timestamp: new Date().toISOString(),
+        usersCount: db.users.length,
+        songsCount: db.songs.length,
+        sharedCount: db.sharedSongs.length
+    });
 });
 
 // ============================================================
@@ -881,19 +705,20 @@ app.post('/webhook', (req, res) => {
 app.listen(PORT, () => {
     console.log(`✅ الخادم يعمل على المنفذ ${PORT}`);
     console.log(`\n📋 نقاط النهاية المتاحة:`);
-    console.log(`   🏠 GET  /healthz               - فحص الصحة`);
-    console.log(`   📊 GET  /songs                 - جلب الأغاني`);
-    console.log(`   🔍 GET  /songs/:taskId         - جلب أغنية واحدة`);
-    console.log(`   ✏️ PUT  /songs/:taskId         - تحديث أغنية (محمي)`);
-    console.log(`   🗑️ DELETE /songs/:taskId       - حذف أغنية (محمي)`);
-    console.log(`   🗑️ DELETE /songs?confirm=yes   - حذف كل الأغاني (محمي)`);
-    console.log(`   📈 GET  /stats                 - إحصائيات متقدمة`);
-    console.log(`   📥 GET  /export?format=json    - تصدير البيانات`);
-    console.log(`   👤 POST /api/users             - إنشاء مستخدم جديد`);
-    console.log(`   🔐 GET  /api/users/me          - معلومات المستخدم (محمي)`);
-    console.log(`   📜 GET  /audit                 - سجل العمليات (محمي)`);
-    console.log(`   🔄 POST /reset?confirm=yes     - إعادة ضبط الخادم (محمي)`);
-    console.log(`   📨 POST /webhook               - استقبال Webhook`);
-    console.log(`\n💡 عدد المستخدمين: ${db.users.length}`);
-    console.log(`💡 عدد الأغاني: ${db.songs.length}`);
+    console.log(`   🔐 POST /api/auth/login      - تسجيل الدخول`);
+    console.log(`   ✨ POST /api/auth/register   - إنشاء حساب`);
+    console.log(`   👤 GET  /api/users/me        - معلومات المستخدم`);
+    console.log(`   🎵 GET  /api/songs           - جلب أغاني المستخدم`);
+    console.log(`   📤 POST /api/songs           - إضافة أغنية جديدة`);
+    console.log(`   🗑️ DELETE /api/songs/:id     - حذف أغنية`);
+    console.log(`   ✏️ PUT  /api/songs/:id       - تحديث أغنية`);
+    console.log(`   🔗 POST /api/songs/:id/share - مشاركة أغنية`);
+    console.log(`   🌐 GET  /api/shared-songs    - الأغاني المشتركة`);
+    console.log(`   📊 GET  /api/stats           - الإحصائيات`);
+    console.log(`   📥 GET  /api/export          - تصدير البيانات`);
+    console.log(`   📨 POST /webhook             - Webhook`);
+    console.log(`   🏠 GET  /healthz             - فحص الصحة`);
+    console.log(`\n👑 Admin: admin@example.com / admin123`);
 });
+
+module.exports = app;

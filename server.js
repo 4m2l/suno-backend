@@ -7,6 +7,9 @@ const crypto = require('crypto');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ============================================================
+// إعدادات CORS
+// ============================================================
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -15,12 +18,17 @@ app.use(cors({
 
 app.use(express.json({ limit: '50mb' }));
 
+// ============================================================
+// إعدادات
+// ============================================================
 const CONFIG = {
     DATA_FILE: path.join(__dirname, 'data.json'),
     MAX_SONGS_PER_USER: 1000
 };
 
-// ========== قاعدة البيانات ==========
+// ============================================================
+// قاعدة البيانات
+// ============================================================
 class Database {
     constructor() {
         this.data = { users: [], songs: [], sharedSongs: [], comments: [], likes: [], auditLogs: [] };
@@ -52,7 +60,13 @@ class Database {
     get auditLogs() { return this.data.auditLogs; }
     set auditLogs(v) { this.data.auditLogs = v; this.save(); }
     addAuditLog(action, userId, details) {
-        this.auditLogs.push({ id: crypto.randomBytes(8).toString('hex'), userId: userId || 'system', action, details, timestamp: new Date().toISOString() });
+        this.auditLogs.push({
+            id: crypto.randomBytes(8).toString('hex'),
+            userId: userId || 'system',
+            action,
+            details,
+            timestamp: new Date().toISOString()
+        });
         if (this.auditLogs.length > 1000) this.auditLogs = this.auditLogs.slice(-1000);
         this.save();
     }
@@ -60,7 +74,9 @@ class Database {
 
 const db = new Database();
 
-// ========== دوال مساعدة ==========
+// ============================================================
+// دوال مساعدة
+// ============================================================
 function hashPassword(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
 function generateToken() { return 'sk-' + crypto.randomBytes(32).toString('hex'); }
 function findUserByEmail(email) { return db.users.find(u => u.email.toLowerCase() === email.toLowerCase()); }
@@ -69,7 +85,9 @@ function findUserByToken(token) { return db.users.find(u => u.apiKey === token);
 function findSongById(id) { return db.songs.find(s => s.id === id); }
 function findSharedSongById(id) { return db.sharedSongs.find(s => s.id === id); }
 
-// ========== Middleware ==========
+// ============================================================
+// Middleware للمصادقة
+// ============================================================
 function authMiddleware(req, res, next) {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -82,7 +100,9 @@ function authMiddleware(req, res, next) {
     next();
 }
 
-// ========== إنشاء Admin ==========
+// ============================================================
+// إنشاء Admin
+// ============================================================
 if (!db.users.find(u => u.username === 'admin')) {
     const admin = {
         id: 'admin-' + crypto.randomBytes(4).toString('hex'),
@@ -100,7 +120,9 @@ if (!db.users.find(u => u.username === 'admin')) {
     console.log('👑 Admin created: admin@example.com / admin123');
 }
 
-// ========== نقاط نهاية المصادقة ==========
+// ============================================================
+// نقاط نهاية المصادقة
+// ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
         const { email, password } = req.body;
@@ -177,12 +199,13 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
     }
 });
 
-// ========== نقاط نهاية الأغاني ==========
+// ============================================================
+// نقاط نهاية الأغاني (خاصة بالمستخدم)
+// ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
 }
 
-// المسار الخاص بالمستخدم (مع /api)
 app.get('/api/songs', authMiddleware, (req, res) => {
     try {
         const userSongs = getUserSongs(req.user.id);
@@ -194,19 +217,19 @@ app.get('/api/songs', authMiddleware, (req, res) => {
     }
 });
 
-// مسار عام للتصحيح (بدون مصادقة) - يمكن إزالته بعد التصحيح
+// مسار عام للتصحيح (بدون مصادقة)
 app.get('/songs-debug', (req, res) => {
     try {
         res.json({
             total: db.songs.length,
-            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl }))
+            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status }))
         });
     } catch (error) {
         res.status(500).json({ error: 'Failed' });
     }
 });
 
-// مسار مخصص لجلب أغاني مستخدم معين (للتصحيح)
+// جلب أغاني مستخدم معين (للتصحيح)
 app.get('/songs/user/:userId', (req, res) => {
     try {
         const userId = req.params.userId;
@@ -341,7 +364,9 @@ app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
     }
 });
 
-// ========== الأغاني المشتركة (عامة) ==========
+// ============================================================
+// الأغاني المشتركة (عامة)
+// ============================================================
 app.get('/api/shared-songs', (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
@@ -373,7 +398,9 @@ app.get('/api/users/:userId/songs', (req, res) => {
     }
 });
 
-// ========== الإعجابات والتعليقات ==========
+// ============================================================
+// الإعجابات والتعليقات
+// ============================================================
 app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
     try {
         const sharedId = req.params.sharedId;
@@ -460,7 +487,9 @@ app.delete('/api/comments/:commentId', authMiddleware, (req, res) => {
     }
 });
 
-// ========== الإحصائيات ==========
+// ============================================================
+// الإحصائيات
+// ============================================================
 app.get('/api/stats', authMiddleware, (req, res) => {
     try {
         const userSongs = db.songs.filter(s => s.userId === req.user.id);
@@ -490,57 +519,74 @@ app.get('/api/stats', authMiddleware, (req, res) => {
     }
 });
 
-// ========== Webhook (مع تصحيح وسجلات مفصلة) ==========
+// ============================================================
+// Webhook الرئيسي (مع سجلات مفصلة وتحسين استخراج البيانات)
+// ============================================================
 app.post('/webhook', (req, res) => {
-    console.log('📨 Webhook received at', new Date().toISOString());
-    console.log('📦 Headers:', JSON.stringify(req.headers, null, 2));
-    console.log('📦 Body:', JSON.stringify(req.body, null, 2));
-    console.log('📦 Query:', req.query);
+    console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
+    console.log('📦 [WEBHOOK] Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('📦 [WEBHOOK] Query:', req.query);
+    console.log('📦 [WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
 
     try {
         const body = req.body;
         const userId = req.query.userId || null;
-        console.log(`👤 UserId from query: ${userId}`);
+        console.log(`👤 [WEBHOOK] userId من query: ${userId}`);
+
+        if (!userId) {
+            console.warn('⚠️ [WEBHOOK] userId غير موجود في query!');
+        }
 
         let clips = [];
         let taskId = null;
 
+        // محاولة استخراج البيانات من عدة هياكل مختلفة
         if (body?.data?.data && Array.isArray(body.data.data)) {
             clips = body.data.data;
             taskId = body.data.task_id || body.task_id || null;
-            console.log(`📌 استخراج من body.data.data, taskId: ${taskId}`);
+            console.log(`📌 [WEBHOOK] استخراج من body.data.data, taskId: ${taskId}`);
         } else if (body?.data && Array.isArray(body.data)) {
             clips = body.data;
             taskId = body.task_id || null;
-            console.log(`📌 استخراج من body.data, taskId: ${taskId}`);
+            console.log(`📌 [WEBHOOK] استخراج من body.data, taskId: ${taskId}`);
         } else if (body?.clips && Array.isArray(body.clips)) {
             clips = body.clips;
             taskId = body.task_id || null;
-            console.log(`📌 استخراج من body.clips, taskId: ${taskId}`);
+            console.log(`📌 [WEBHOOK] استخراج من body.clips, taskId: ${taskId}`);
         } else if (Array.isArray(body)) {
             clips = body;
-            console.log(`📌 استخراج من الجسم الرئيسي (مصفوفة)`);
+            console.log(`📌 [WEBHOOK] استخراج من الجسم الرئيسي (مصفوفة)`);
+        } else {
+            // محاولة البحث عن أي مصفوفة داخل الكائن
+            for (const key in body) {
+                if (Array.isArray(body[key])) {
+                    clips = body[key];
+                    console.log(`📌 [WEBHOOK] استخراج من body.${key} (مصفوفة)`);
+                    break;
+                }
+            }
         }
 
         if (clips.length === 0) {
-            console.log('⚠️ لم يتم العثور على أي مقاطع صوتية في البايلود');
-            return res.status(200).json({ received: true, error: 'No clips found' });
+            console.warn('⚠️ [WEBHOOK] لم يتم العثور على أي مقاطع صوتية في البايلود');
+            return res.status(200).json({ received: true, error: 'No clips found', body: body });
         }
 
-        console.log(`🎵 عدد المقاطع المستلمة: ${clips.length}`);
+        console.log(`🎵 [WEBHOOK] عدد المقاطع المستلمة: ${clips.length}`);
         let savedCount = 0;
 
         clips.forEach((clip, index) => {
-            const audioUrl = clip.audio_url || clip.audioUrl || clip.url || clip.downloadUrl || clip.streamUrl || null;
-            const imageUrl = clip.image_url || clip.imageUrl || clip.coverUrl || null;
-            const title = clip.title || clip.name || clip.songName || `مقطع ${index + 1}`;
+            // محاولة استخراج الرابط من عدة حقول
+            const audioUrl = clip.audio_url || clip.audioUrl || clip.url || clip.downloadUrl || clip.streamUrl || clip.audio || null;
+            const imageUrl = clip.image_url || clip.imageUrl || clip.coverUrl || clip.cover_url || null;
+            const title = clip.title || clip.name || clip.songName || clip.song_title || `مقطع ${index + 1}`;
             const style = clip.tags || clip.style || clip.genre || '';
-            const duration = clip.duration || clip.duration_sec || null;
-            const prompt = clip.prompt || clip.lyrics || '';
-            const audioId = clip.id || clip.audioId || clip.clip_id || `clip-${index}`;
+            const duration = clip.duration || clip.duration_sec || clip.duration_ms ? clip.duration_ms / 1000 : null;
+            const prompt = clip.prompt || clip.lyrics || clip.text || '';
+            const audioId = clip.id || clip.audioId || clip.clip_id || clip.audio_id || `clip-${index}`;
             const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
 
-            console.log(`🔄 المقطع ${index + 1}: ${title} - رابط: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
+            console.log(`🔄 [WEBHOOK] المقطع ${index + 1}: "${title}" - رابط: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
 
             const song = {
                 id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
@@ -562,6 +608,7 @@ app.post('/webhook', (req, res) => {
                 updatedAt: new Date().toISOString()
             };
 
+            // التحقق من التكرار
             const exists = db.songs.some(s => s.taskId === song.taskId && s.audioId === song.audioId);
             if (!exists) {
                 db.songs.push(song);
@@ -570,64 +617,78 @@ app.post('/webhook', (req, res) => {
                     const user = findUserById(userId);
                     if (user) {
                         user.totalSongs = (user.totalSongs || 0) + 1;
-                        console.log(`✅ تم تحديث عدد أغاني المستخدم ${user.username} إلى ${user.totalSongs}`);
+                        console.log(`✅ [WEBHOOK] تم تحديث عدد أغاني المستخدم ${user.username} إلى ${user.totalSongs}`);
                     } else {
-                        console.log(`⚠️ المستخدم ذو المعرف ${userId} غير موجود!`);
+                        console.warn(`⚠️ [WEBHOOK] المستخدم ذو المعرف ${userId} غير موجود في قاعدة البيانات!`);
                     }
                 }
-                console.log(`✅ تم حفظ الأغنية: ${song.title} (الحالة: ${song.status})`);
+                console.log(`✅ [WEBHOOK] تم حفظ الأغنية: "${song.title}" (الحالة: ${song.status})`);
             } else {
-                console.log(`⏭️ الأغنية مكررة: ${song.title}`);
+                console.log(`⏭️ [WEBHOOK] الأغنية مكررة: "${song.title}"`);
             }
         });
 
         db.save();
         db.addAuditLog('webhook_received', userId || 'system', { count: savedCount });
-        console.log(`💾 تم حفظ ${savedCount} أغنية جديدة`);
+        console.log(`💾 [WEBHOOK] تم حفظ ${savedCount} أغنية جديدة من أصل ${clips.length}`);
         return res.status(200).json({ received: true, saved: savedCount });
 
     } catch (error) {
-        console.error('❌ خطأ في Webhook:', error);
-        res.status(500).json({ error: 'Webhook processing failed' });
+        console.error('❌ [WEBHOOK] خطأ:', error);
+        res.status(500).json({ error: 'Webhook processing failed', details: error.message });
     }
 });
 
-// ========== نقطة نهاية لاختبار Webhook يدوياً ==========
+// ============================================================
+// نقطة اختبار Webhook يدوياً (POST)
+// ============================================================
 app.post('/webhook-test', (req, res) => {
-    console.log('🧪 Webhook test received');
+    console.log('🧪 [WEBHOOK-TEST] تم استقبال طلب اختبار');
+    const userId = req.query.userId || req.body.userId || null;
+    console.log(`👤 [WEBHOOK-TEST] userId: ${userId}`);
+
+    // إنشاء بيانات اختبار
     const testData = {
         data: {
             data: [
                 {
                     id: 'test-' + Date.now(),
-                    audio_url: 'https://example.com/test-song.mp3',
-                    title: 'Test Song',
-                    style: 'pop',
-                    duration: 180
+                    audio_url: 'https://example.com/test-song-' + Date.now() + '.mp3',
+                    title: 'أغنية اختبار ' + new Date().toLocaleTimeString(),
+                    style: 'pop, test',
+                    duration: 180,
+                    image_url: 'https://via.placeholder.com/300x300/1a1a2e/ffffff?text=Test'
                 }
             ],
             task_id: 'test-task-' + Date.now()
         }
     };
-    // محاكاة طلب Webhook مع userId من query
-    const mockReq = { body: testData, query: { userId: req.query.userId || null } };
-    // نعيد توجيه الطلب إلى معالج Webhook
-    req.body = testData;
-    req.query = mockReq.query;
-    app._router.handle(req, res, (err) => {
-        if (err) console.error('Test webhook error:', err);
-    });
-    // لكن الأفضل نعيد توجيهه داخلياً
-    // ننفذ معالج Webhook مباشرة
+
+    console.log('📦 [WEBHOOK-TEST] بيانات الاختبار:', JSON.stringify(testData, null, 2));
+
+    // محاكاة طلب Webhook
+    const mockReq = {
+        body: testData,
+        query: { userId: userId }
+    };
+
+    // استدعاء معالج Webhook مباشرة
     const webhookHandler = app._router.stack.find(layer => layer.route && layer.route.path === '/webhook');
     if (webhookHandler) {
+        // تعديل req و res مؤقتاً
+        const originalReq = req;
+        const originalRes = res;
+        req.body = mockReq.body;
+        req.query = mockReq.query;
         webhookHandler.handle(req, res);
     } else {
         res.status(500).json({ error: 'Webhook handler not found' });
     }
 });
 
-// ========== فحص الصحة ==========
+// ============================================================
+// فحص الصحة
+// ============================================================
 app.get('/healthz', (req, res) => {
     res.status(200).json({
         status: 'OK',
@@ -640,16 +701,19 @@ app.get('/healthz', (req, res) => {
     });
 });
 
+// ============================================================
+// تشغيل الخادم
+// ============================================================
 app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`📋 Endpoints:`);
-    console.log(`   POST /api/auth/login`);
-    console.log(`   POST /api/auth/register`);
-    console.log(`   GET  /api/songs (auth required)`);
-    console.log(`   GET  /songs-debug (public, for debugging)`);
-    console.log(`   GET  /songs/user/:userId (public, for debugging)`);
-    console.log(`   POST /webhook (Suno callback)`);
-    console.log(`   POST /webhook-test (test webhook manually)`);
-    console.log(`   GET  /healthz`);
+    console.log(`   🔐 POST /api/auth/login`);
+    console.log(`   ✨ POST /api/auth/register`);
+    console.log(`   🎵 GET  /api/songs (auth required)`);
+    console.log(`   🎵 GET  /songs-debug (public, debug)`);
+    console.log(`   🎵 GET  /songs/user/:userId (public, debug)`);
+    console.log(`   📨 POST /webhook (Suno callback)`);
+    console.log(`   🧪 POST /webhook-test?userId=xxx (test webhook)`);
+    console.log(`   🏠 GET  /healthz`);
     console.log(`👑 Admin: admin@example.com / admin123`);
 });

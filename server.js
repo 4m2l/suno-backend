@@ -299,17 +299,54 @@ app.put('/api/songs/:songId', authMiddleware, (req, res) => {
         const songId = req.params.songId;
         const song = findSongById(songId);
         if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { title, style, prompt, isShared } = req.body;
+        const { title, style, prompt, isShared, audioUrl, downloadUrl, imageUrl, duration, status } = req.body;
         if (title) song.title = title;
         if (style) song.style = style;
         if (prompt) song.prompt = prompt;
         if (isShared !== undefined) song.isShared = isShared;
+        if (audioUrl) { song.audioUrl = audioUrl; song.downloadUrl = audioUrl; song.status = 'success'; }
+        if (downloadUrl) song.downloadUrl = downloadUrl;
+        if (imageUrl) song.imageUrl = imageUrl;
+        if (duration) song.duration = duration;
+        if (status) song.status = status;
         song.updatedAt = new Date().toISOString();
         db.save();
         db.addAuditLog('song_updated', req.user.id, { title: song.title });
         res.json({ success: true, song });
     } catch (error) {
         console.error('Error updating song:', error);
+        res.status(500).json({ error: 'Failed to update song' });
+    }
+});
+
+// نقطة نهاية لتحديث الأغنية يدوياً (من التطبيق)
+app.post('/api/songs/update/:songId', authMiddleware, (req, res) => {
+    try {
+        const songId = req.params.songId;
+        const song = findSongById(songId);
+        if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
+        const { audioUrl, downloadUrl, imageUrl, duration, status } = req.body;
+        let updated = false;
+        if (audioUrl && audioUrl.startsWith('https://')) {
+            song.audioUrl = audioUrl;
+            song.downloadUrl = audioUrl;
+            song.status = 'success';
+            updated = true;
+        }
+        if (downloadUrl) song.downloadUrl = downloadUrl;
+        if (imageUrl) song.imageUrl = imageUrl;
+        if (duration) song.duration = duration;
+        if (status) song.status = status;
+        if (updated) {
+            song.updatedAt = new Date().toISOString();
+            db.save();
+            db.addAuditLog('song_updated_manually', req.user.id, { title: song.title });
+            res.json({ success: true, message: 'Song updated', song });
+        } else {
+            res.json({ success: false, message: 'No valid audio URL provided' });
+        }
+    } catch (error) {
+        console.error('Error updating song manually:', error);
         res.status(500).json({ error: 'Failed to update song' });
     }
 });
@@ -520,7 +557,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook الرئيسي (مع سجلات مفصلة وتحسين استخراج البيانات)
+// Webhook الرئيسي (مع تحديث الأغاني المعلقة)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
@@ -574,6 +611,7 @@ app.post('/webhook', (req, res) => {
 
         console.log(`🎵 [WEBHOOK] عدد المقاطع المستلمة: ${clips.length}`);
         let savedCount = 0;
+        let updatedCount = 0;
 
         clips.forEach((clip, index) => {
             // محاولة استخراج الرابط من عدة حقول
@@ -588,29 +626,48 @@ app.post('/webhook', (req, res) => {
 
             console.log(`🔄 [WEBHOOK] المقطع ${index + 1}: "${title}" - رابط: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
 
-            const song = {
-                id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
-                userId: userId,
-                taskId: clipTaskId,
-                audioId: audioId,
-                audioUrl: audioUrl,
-                downloadUrl: audioUrl || null,
-                imageUrl: imageUrl || null,
-                title: title || 'بدون عنوان',
-                style: style || '',
-                prompt: prompt || '',
-                duration: duration || null,
-                status: audioUrl ? 'success' : 'pending',
-                isShared: false,
-                likes: 0,
-                commentsCount: 0,
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString()
-            };
+            // البحث عن أغنية موجودة بنفس taskId و audioId
+            const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
 
-            // التحقق من التكرار
-            const exists = db.songs.some(s => s.taskId === song.taskId && s.audioId === song.audioId);
-            if (!exists) {
+            if (existingSong) {
+                // تحديث الأغنية الموجودة إذا كان هناك رابط جديد
+                if (audioUrl && audioUrl.startsWith('https://') && !existingSong.audioUrl) {
+                    existingSong.audioUrl = audioUrl;
+                    existingSong.downloadUrl = audioUrl;
+                    existingSong.status = 'success';
+                    existingSong.updatedAt = new Date().toISOString();
+                    if (imageUrl) existingSong.imageUrl = imageUrl;
+                    if (duration) existingSong.duration = duration;
+                    if (title) existingSong.title = title;
+                    if (style) existingSong.style = style;
+                    updatedCount++;
+                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}" بالرابط ${audioUrl}`);
+                } else if (audioUrl && audioUrl.startsWith('https://') && existingSong.audioUrl) {
+                    console.log(`⏭️ [WEBHOOK] الأغنية "${existingSong.title}" موجودة بالفعل ولها رابط`);
+                } else {
+                    console.log(`⏭️ [WEBHOOK] الأغنية "${existingSong.title}" موجودة ولكن بدون رابط جديد`);
+                }
+            } else {
+                // إنشاء أغنية جديدة
+                const song = {
+                    id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                    userId: userId,
+                    taskId: clipTaskId,
+                    audioId: audioId,
+                    audioUrl: audioUrl,
+                    downloadUrl: audioUrl || null,
+                    imageUrl: imageUrl || null,
+                    title: title || 'بدون عنوان',
+                    style: style || '',
+                    prompt: prompt || '',
+                    duration: duration || null,
+                    status: audioUrl ? 'success' : 'pending',
+                    isShared: false,
+                    likes: 0,
+                    commentsCount: 0,
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
                 db.songs.push(song);
                 savedCount++;
                 if (userId) {
@@ -622,16 +679,14 @@ app.post('/webhook', (req, res) => {
                         console.warn(`⚠️ [WEBHOOK] المستخدم ذو المعرف ${userId} غير موجود في قاعدة البيانات!`);
                     }
                 }
-                console.log(`✅ [WEBHOOK] تم حفظ الأغنية: "${song.title}" (الحالة: ${song.status})`);
-            } else {
-                console.log(`⏭️ [WEBHOOK] الأغنية مكررة: "${song.title}"`);
+                console.log(`✅ [WEBHOOK] تم حفظ الأغنية الجديدة: "${song.title}" (الحالة: ${song.status})`);
             }
         });
 
         db.save();
-        db.addAuditLog('webhook_received', userId || 'system', { count: savedCount });
-        console.log(`💾 [WEBHOOK] تم حفظ ${savedCount} أغنية جديدة من أصل ${clips.length}`);
-        return res.status(200).json({ received: true, saved: savedCount });
+        db.addAuditLog('webhook_received', userId || 'system', { count: savedCount, updated: updatedCount });
+        console.log(`💾 [WEBHOOK] تم حفظ ${savedCount} أغنية جديدة وتحديث ${updatedCount} أغنية`);
+        return res.status(200).json({ received: true, saved: savedCount, updated: updatedCount });
 
     } catch (error) {
         console.error('❌ [WEBHOOK] خطأ:', error);
@@ -675,14 +730,33 @@ app.post('/webhook-test', (req, res) => {
     // استدعاء معالج Webhook مباشرة
     const webhookHandler = app._router.stack.find(layer => layer.route && layer.route.path === '/webhook');
     if (webhookHandler) {
-        // تعديل req و res مؤقتاً
-        const originalReq = req;
-        const originalRes = res;
         req.body = mockReq.body;
         req.query = mockReq.query;
         webhookHandler.handle(req, res);
     } else {
         res.status(500).json({ error: 'Webhook handler not found' });
+    }
+});
+
+// ============================================================
+// نقطة نهاية للتحقق من حالة مهمة من Suno API (اختياري)
+// ============================================================
+app.post('/api/songs/check-status/:taskId', authMiddleware, async (req, res) => {
+    try {
+        const taskId = req.params.taskId;
+        const apiKey = req.body.apiKey;
+        if (!apiKey) return res.status(400).json({ error: 'API Key required' });
+
+        // استدعاء Suno API للحصول على حالة المهمة
+        const response = await fetch(`https://api.sunoapi.org/api/v1/generate/status?taskId=${taskId}`, {
+            method: 'GET',
+            headers: { 'Authorization': `Bearer ${apiKey}` }
+        });
+        const data = await response.json();
+        res.json(data);
+    } catch (error) {
+        console.error('Error checking status:', error);
+        res.status(500).json({ error: 'Failed to check status' });
     }
 });
 

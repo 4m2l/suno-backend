@@ -149,7 +149,7 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// إنشاء مستخدم Admin إذا لم يكن موجوداً (بدون رصيد افتراضي)
+// إنشاء مستخدم Admin (بدون رصيد افتراضي)
 // ============================================================
 if (!db.users.find(u => u.username === 'admin')) {
     const admin = {
@@ -325,7 +325,6 @@ app.post('/api/songs', authMiddleware, (req, res) => {
             imageUrl: imageUrl || null,
             prompt: prompt || '',
             duration: duration || null,
-            // لا نستخدم credits
             status: 'success',
             isShared: false,
             likes: 0,
@@ -680,7 +679,7 @@ app.delete('/api/comments/:commentId', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// الإحصائيات الشخصية (بدون رصيد)
+// الإحصائيات الشخصية
 // ============================================================
 
 app.get('/api/stats', authMiddleware, (req, res) => {
@@ -725,14 +724,15 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook (لا يخصم رصيداً)
+// Webhook (تم التصحيح: قراءة userId من query string)
 // ============================================================
 
 app.post('/webhook', (req, res) => {
     console.log('📨 Webhook received');
     try {
         const body = req.body;
-        const userId = req.headers['x-user-id'] || null;
+        // التصحيح: قراءة userId من query parameters
+        const userId = req.query.userId || null;
 
         if (body?.data?.data && Array.isArray(body.data.data)) {
             const taskId = body.data.task_id || body.task_id || null;
@@ -773,7 +773,9 @@ app.post('/webhook', (req, res) => {
                                 user.totalSongs = (user.totalSongs || 0) + 1;
                             }
                         }
-                        console.log(`✅ تم حفظ الأغنية: ${song.title}`);
+                        console.log(`✅ تم حفظ الأغنية: ${song.title} للمستخدم ${userId || 'غير معروف'}`);
+                    } else {
+                        console.log(`⏭️ الأغنية مكررة: ${song.title}`);
                     }
                 }
             });

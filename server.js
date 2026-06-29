@@ -35,6 +35,8 @@ class Database {
             users: [],
             songs: [],
             sharedSongs: [],
+            comments: [],
+            likes: [],
             auditLogs: []
         };
         this.load();
@@ -69,6 +71,12 @@ class Database {
     get sharedSongs() { return this.data.sharedSongs; }
     set sharedSongs(val) { this.data.sharedSongs = val; this.save(); }
 
+    get comments() { return this.data.comments; }
+    set comments(val) { this.data.comments = val; this.save(); }
+
+    get likes() { return this.data.likes; }
+    set likes(val) { this.data.likes = val; this.save(); }
+
     get auditLogs() { return this.data.auditLogs; }
     set auditLogs(val) { this.data.auditLogs = val; this.save(); }
 
@@ -88,26 +96,6 @@ class Database {
 }
 
 const db = new Database();
-
-// إنشاء مستخدم Admin إذا لم يكن موجوداً
-if (!db.users.find(u => u.username === 'admin')) {
-    const admin = {
-        id: 'admin-' + crypto.randomBytes(4).toString('hex'),
-        username: 'admin',
-        email: 'admin@example.com',
-        password: crypto.createHash('sha256').update('admin123').digest('hex'),
-        credits: 9999,
-        createdAt: new Date().toISOString(),
-        totalSongs: 0,
-        isActive: true,
-        role: 'admin'
-    };
-    db.users.push(admin);
-    db.save();
-    console.log('👑 تم إنشاء مستخدم Admin:');
-    console.log(`   📧 Email: admin@example.com`);
-    console.log(`   🔑 Password: admin123`);
-}
 
 // ============================================================
 // دوال مساعدة
@@ -132,6 +120,14 @@ function findUserByToken(token) {
     return db.users.find(u => u.apiKey === token);
 }
 
+function findSongById(id) {
+    return db.songs.find(s => s.id === id);
+}
+
+function findSharedSongById(id) {
+    return db.sharedSongs.find(s => s.id === id);
+}
+
 // ============================================================
 // Middleware للمصادقة
 // ============================================================
@@ -153,13 +149,37 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// نقاط نهاية المستخدمين
+// إنشاء مستخدم Admin إذا لم يكن موجوداً
+// ============================================================
+if (!db.users.find(u => u.username === 'admin')) {
+    const admin = {
+        id: 'admin-' + crypto.randomBytes(4).toString('hex'),
+        username: 'admin',
+        email: 'admin@example.com',
+        password: hashPassword('admin123'),
+        apiKey: generateToken(),
+        credits: 9999,
+        createdAt: new Date().toISOString(),
+        totalSongs: 0,
+        isActive: true,
+        role: 'admin'
+    };
+    db.users.push(admin);
+    db.save();
+    console.log('👑 تم إنشاء مستخدم Admin:');
+    console.log(`   📧 Email: admin@example.com`);
+    console.log(`   🔑 Password: admin123`);
+}
+
+// ============================================================
+// نقاط نهاية المصادقة
 // ============================================================
 
-// 1. تسجيل الدخول (بالبريد الإلكتروني وكلمة المرور)
+// 1. تسجيل الدخول
 app.post('/api/auth/login', (req, res) => {
     try {
         const { email, password } = req.body;
+        console.log('🔐 محاولة تسجيل الدخول:', email);
 
         if (!email || !password) {
             return res.status(400).json({ error: 'Email and password are required' });
@@ -170,12 +190,10 @@ app.post('/api/auth/login', (req, res) => {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
 
-        const hashedPassword = hashPassword(password);
-        if (user.password !== hashedPassword) {
+        if (user.password !== hashPassword(password)) {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
 
-        // إنشاء توكن جديد
         const token = generateToken();
         user.apiKey = token;
         user.lastLogin = new Date().toISOString();
@@ -204,6 +222,7 @@ app.post('/api/auth/login', (req, res) => {
 app.post('/api/auth/register', (req, res) => {
     try {
         const { username, email, password } = req.body;
+        console.log('📝 محاولة إنشاء حساب:', username, email);
 
         if (!username || !email || !password) {
             return res.status(400).json({ error: 'Username, email and password are required' });
@@ -264,40 +283,7 @@ app.get('/api/users/me', authMiddleware, (req, res) => {
     });
 });
 
-// 4. تحديث معلومات المستخدم
-app.put('/api/users/me', authMiddleware, (req, res) => {
-    try {
-        const user = req.user;
-        const { username, password } = req.body;
-
-        if (username) user.username = username;
-        if (password) {
-            if (password.length < 6) {
-                return res.status(400).json({ error: 'Password must be at least 6 characters' });
-            }
-            user.password = hashPassword(password);
-        }
-
-        db.save();
-        db.addAuditLog('user_updated', user.id, { username: user.username });
-
-        res.json({
-            success: true,
-            message: 'Profile updated successfully',
-            user: {
-                id: user.id,
-                username: user.username,
-                email: user.email,
-                credits: user.credits
-            }
-        });
-    } catch (error) {
-        console.error('Update error:', error);
-        res.status(500).json({ error: 'Update failed' });
-    }
-});
-
-// 5. تسجيل الخروج
+// 4. تسجيل الخروج
 app.post('/api/auth/logout', authMiddleware, (req, res) => {
     try {
         const user = req.user;
@@ -314,7 +300,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 // نقاط نهاية الأغاني (خاصة بكل مستخدم)
 // ============================================================
 
-// 6. جلب أغاني المستخدم
+// 5. جلب أغاني المستخدم
 app.get('/api/songs', authMiddleware, (req, res) => {
     try {
         const userSongs = db.songs.filter(s => s.userId === req.user.id);
@@ -328,7 +314,7 @@ app.get('/api/songs', authMiddleware, (req, res) => {
     }
 });
 
-// 7. إضافة أغنية جديدة
+// 6. إضافة أغنية جديدة (عن طريق Webhook)
 app.post('/api/songs', authMiddleware, (req, res) => {
     try {
         const { title, style, audioUrl, downloadUrl, imageUrl, prompt, duration, credits } = req.body;
@@ -352,6 +338,8 @@ app.post('/api/songs', authMiddleware, (req, res) => {
             credits: credits || 12,
             status: 'success',
             isShared: false,
+            likes: 0,
+            commentsCount: 0,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
         };
@@ -372,7 +360,7 @@ app.post('/api/songs', authMiddleware, (req, res) => {
     }
 });
 
-// 8. حذف أغنية
+// 7. حذف أغنية
 app.delete('/api/songs/:songId', authMiddleware, (req, res) => {
     try {
         const songId = req.params.songId;
@@ -387,8 +375,10 @@ app.delete('/api/songs/:songId', authMiddleware, (req, res) => {
         db.save();
         db.addAuditLog('song_deleted', req.user.id, { title: deleted.title });
 
-        // حذف من المشاركات
+        // حذف من المشاركات والتعليقات والإعجابات
         db.sharedSongs = db.sharedSongs.filter(s => s.songId !== songId);
+        db.comments = db.comments.filter(c => c.songId !== songId);
+        db.likes = db.likes.filter(l => l.songId !== songId);
         db.save();
 
         res.json({
@@ -401,13 +391,13 @@ app.delete('/api/songs/:songId', authMiddleware, (req, res) => {
     }
 });
 
-// 9. تحديث أغنية
+// 8. تحديث أغنية
 app.put('/api/songs/:songId', authMiddleware, (req, res) => {
     try {
         const songId = req.params.songId;
-        const song = db.songs.find(s => s.id === songId && s.userId === req.user.id);
+        const song = findSongById(songId);
 
-        if (!song) {
+        if (!song || song.userId !== req.user.id) {
             return res.status(404).json({ error: 'Song not found' });
         }
 
@@ -431,14 +421,20 @@ app.put('/api/songs/:songId', authMiddleware, (req, res) => {
     }
 });
 
-// 10. مشاركة أغنية
+// 9. مشاركة أغنية
 app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
     try {
         const songId = req.params.songId;
-        const song = db.songs.find(s => s.id === songId && s.userId === req.user.id);
+        const song = findSongById(songId);
 
-        if (!song) {
+        if (!song || song.userId !== req.user.id) {
             return res.status(404).json({ error: 'Song not found' });
+        }
+
+        // التحقق من عدم وجودها مسبقاً
+        const existing = db.sharedSongs.find(s => s.songId === songId);
+        if (existing) {
+            return res.status(400).json({ error: 'Song already shared' });
         }
 
         const shared = {
@@ -452,17 +448,15 @@ app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
             downloadUrl: song.downloadUrl,
             imageUrl: song.imageUrl,
             duration: song.duration,
+            likes: 0,
+            commentsCount: 0,
             sharedAt: new Date().toISOString()
         };
 
-        // تجنب التكرار
-        const existing = db.sharedSongs.findIndex(s => s.songId === songId);
-        if (existing === -1) {
-            db.sharedSongs.push(shared);
-            song.isShared = true;
-            db.save();
-            db.addAuditLog('song_shared', req.user.id, { title: song.title });
-        }
+        db.sharedSongs.push(shared);
+        song.isShared = true;
+        db.save();
+        db.addAuditLog('song_shared', req.user.id, { title: song.title });
 
         res.json({
             success: true,
@@ -474,17 +468,18 @@ app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
     }
 });
 
-// 11. إلغاء مشاركة أغنية
+// 10. إلغاء مشاركة أغنية
 app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
     try {
         const songId = req.params.songId;
-        const song = db.songs.find(s => s.id === songId && s.userId === req.user.id);
+        const song = findSongById(songId);
 
-        if (song) {
-            song.isShared = false;
+        if (!song || song.userId !== req.user.id) {
+            return res.status(404).json({ error: 'Song not found' });
         }
 
         db.sharedSongs = db.sharedSongs.filter(s => s.songId !== songId);
+        song.isShared = false;
         db.save();
         db.addAuditLog('song_unshared', req.user.id, { songId });
 
@@ -498,7 +493,7 @@ app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
     }
 });
 
-// 12. جلب الأغاني المشتركة (لجميع المستخدمين)
+// 11. جلب الأغاني المشتركة (Public)
 app.get('/api/shared-songs', (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
@@ -506,9 +501,21 @@ app.get('/api/shared-songs', (req, res) => {
             .sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt))
             .slice(0, limit);
 
+        // إضافة عدد الإعجابات والتعليقات
+        const result = shared.map(s => {
+            const likes = db.likes.filter(l => l.sharedSongId === s.id).length;
+            const comments = db.comments.filter(c => c.sharedSongId === s.id).length;
+            return {
+                ...s,
+                likes: likes,
+                commentsCount: comments,
+                userLiked: false // سيتم تحديثه في الواجهة
+            };
+        });
+
         res.json({
             total: db.sharedSongs.length,
-            data: shared
+            data: result
         });
     } catch (error) {
         console.error('Error fetching shared songs:', error);
@@ -516,7 +523,7 @@ app.get('/api/shared-songs', (req, res) => {
     }
 });
 
-// 13. جلب أغاني مستخدم معين (للبروفايل)
+// 12. جلب أغاني مستخدم معين (للملف الشخصي)
 app.get('/api/users/:userId/songs', (req, res) => {
     try {
         const userId = req.params.userId;
@@ -537,17 +544,180 @@ app.get('/api/users/:userId/songs', (req, res) => {
     }
 });
 
-// 14. الإحصائيات الشخصية
+// ============================================================
+// نقاط نهاية الإعجابات والتعليقات
+// ============================================================
+
+// 13. إعجاب بأغنية مشتركة
+app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
+    try {
+        const sharedId = req.params.sharedId;
+        const shared = findSharedSongById(sharedId);
+
+        if (!shared) {
+            return res.status(404).json({ error: 'Shared song not found' });
+        }
+
+        // التحقق من وجود الإعجاب مسبقاً
+        const existing = db.likes.find(l => l.sharedSongId === sharedId && l.userId === req.user.id);
+        if (existing) {
+            return res.status(400).json({ error: 'Already liked' });
+        }
+
+        const like = {
+            id: 'like-' + Date.now(),
+            sharedSongId: sharedId,
+            userId: req.user.id,
+            username: req.user.username,
+            createdAt: new Date().toISOString()
+        };
+
+        db.likes.push(like);
+        shared.likes = (shared.likes || 0) + 1;
+        db.save();
+        db.addAuditLog('song_liked', req.user.id, { sharedId });
+
+        res.json({
+            success: true,
+            likes: shared.likes
+        });
+    } catch (error) {
+        console.error('Error liking song:', error);
+        res.status(500).json({ error: 'Failed to like song' });
+    }
+});
+
+// 14. إلغاء الإعجاب
+app.delete('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
+    try {
+        const sharedId = req.params.sharedId;
+        const shared = findSharedSongById(sharedId);
+
+        if (!shared) {
+            return res.status(404).json({ error: 'Shared song not found' });
+        }
+
+        const index = db.likes.findIndex(l => l.sharedSongId === sharedId && l.userId === req.user.id);
+        if (index === -1) {
+            return res.status(400).json({ error: 'Not liked' });
+        }
+
+        db.likes.splice(index, 1);
+        shared.likes = (shared.likes || 1) - 1;
+        db.save();
+        db.addAuditLog('song_unliked', req.user.id, { sharedId });
+
+        res.json({
+            success: true,
+            likes: shared.likes
+        });
+    } catch (error) {
+        console.error('Error unliking song:', error);
+        res.status(500).json({ error: 'Failed to unlike song' });
+    }
+});
+
+// 15. إضافة تعليق
+app.post('/api/shared-songs/:sharedId/comments', authMiddleware, (req, res) => {
+    try {
+        const sharedId = req.params.sharedId;
+        const { text } = req.body;
+
+        if (!text || text.trim().length === 0) {
+            return res.status(400).json({ error: 'Comment text is required' });
+        }
+
+        const shared = findSharedSongById(sharedId);
+        if (!shared) {
+            return res.status(404).json({ error: 'Shared song not found' });
+        }
+
+        const comment = {
+            id: 'comment-' + Date.now(),
+            sharedSongId: sharedId,
+            userId: req.user.id,
+            username: req.user.username,
+            text: text.trim(),
+            createdAt: new Date().toISOString()
+        };
+
+        db.comments.push(comment);
+        shared.commentsCount = (shared.commentsCount || 0) + 1;
+        db.save();
+        db.addAuditLog('comment_added', req.user.id, { sharedId });
+
+        res.json({
+            success: true,
+            comment: comment,
+            commentsCount: shared.commentsCount
+        });
+    } catch (error) {
+        console.error('Error adding comment:', error);
+        res.status(500).json({ error: 'Failed to add comment' });
+    }
+});
+
+// 16. جلب تعليقات أغنية مشتركة
+app.get('/api/shared-songs/:sharedId/comments', (req, res) => {
+    try {
+        const sharedId = req.params.sharedId;
+        const comments = db.comments
+            .filter(c => c.sharedSongId === sharedId)
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        res.json({
+            total: comments.length,
+            data: comments
+        });
+    } catch (error) {
+        console.error('Error fetching comments:', error);
+        res.status(500).json({ error: 'Failed to fetch comments' });
+    }
+});
+
+// 17. حذف تعليق
+app.delete('/api/comments/:commentId', authMiddleware, (req, res) => {
+    try {
+        const commentId = req.params.commentId;
+        const index = db.comments.findIndex(c => c.id === commentId && c.userId === req.user.id);
+
+        if (index === -1) {
+            return res.status(404).json({ error: 'Comment not found' });
+        }
+
+        const comment = db.comments[index];
+        const shared = findSharedSongById(comment.sharedSongId);
+        if (shared) {
+            shared.commentsCount = (shared.commentsCount || 1) - 1;
+        }
+
+        db.comments.splice(index, 1);
+        db.save();
+        db.addAuditLog('comment_deleted', req.user.id, { commentId });
+
+        res.json({
+            success: true,
+            message: 'Comment deleted successfully'
+        });
+    } catch (error) {
+        console.error('Error deleting comment:', error);
+        res.status(500).json({ error: 'Failed to delete comment' });
+    }
+});
+
+// ============================================================
+// الإحصائيات الشخصية
+// ============================================================
+
+// 18. الإحصائيات الشخصية
 app.get('/api/stats', authMiddleware, (req, res) => {
     try {
         const userSongs = db.songs.filter(s => s.userId === req.user.id);
         const total = userSongs.length;
         const sharedCount = userSongs.filter(s => s.isShared).length;
 
-        // حساب الرصيد المستهلك
         const creditsUsed = userSongs.reduce((sum, s) => sum + (s.credits || 0), 0);
 
-        // الأنماط الأكثر استخداماً
         const styleCount = {};
         userSongs.forEach(s => {
             if (s.style) {
@@ -563,12 +733,19 @@ app.get('/api/stats', authMiddleware, (req, res) => {
             .slice(0, 5)
             .map(([style, count]) => ({ style, count }));
 
+        // إحصائيات التفاعل
+        const sharedSongs = db.sharedSongs.filter(s => s.userId === req.user.id);
+        const totalLikes = sharedSongs.reduce((sum, s) => sum + (s.likes || 0), 0);
+        const totalComments = sharedSongs.reduce((sum, s) => sum + (s.commentsCount || 0), 0);
+
         res.json({
             totalSongs: total,
             sharedSongs: sharedCount,
             creditsUsed: creditsUsed,
             creditsRemaining: req.user.credits || 0,
             topStyles: topStyles,
+            totalLikes: totalLikes,
+            totalComments: totalComments,
             averageDuration: userSongs
                 .filter(s => s.duration)
                 .reduce((sum, s) => sum + (s.duration || 0), 0) / (userSongs.filter(s => s.duration).length || 1)
@@ -579,48 +756,12 @@ app.get('/api/stats', authMiddleware, (req, res) => {
     }
 });
 
-// 15. تصدير أغاني المستخدم
-app.get('/api/export', authMiddleware, (req, res) => {
-    try {
-        const format = req.query.format || 'json';
-        const userSongs = db.songs.filter(s => s.userId === req.user.id);
-
-        if (format === 'json') {
-            res.setHeader('Content-Type', 'application/json');
-            res.setHeader('Content-Disposition', `attachment; filename=songs-${Date.now()}.json`);
-            return res.json(userSongs);
-        }
-
-        if (format === 'csv') {
-            const headers = ['title', 'style', 'duration', 'credits', 'createdAt'];
-            const rows = [headers.join(',')];
-            userSongs.forEach(s => {
-                const row = headers.map(h => {
-                    let val = s[h] || '';
-                    if (typeof val === 'string' && val.includes(',')) val = `"${val}"`;
-                    return val;
-                });
-                rows.push(row.join(','));
-            });
-
-            res.setHeader('Content-Type', 'text/csv');
-            res.setHeader('Content-Disposition', `attachment; filename=songs-${Date.now()}.csv`);
-            return res.send(rows.join('\n'));
-        }
-
-        res.status(400).json({ error: 'Invalid format' });
-    } catch (error) {
-        console.error('Export error:', error);
-        res.status(500).json({ error: 'Export failed' });
-    }
-});
-
 // ============================================================
 // Webhook (للاستقبال من Suno API)
 // ============================================================
-app.post('/webhook', (req, res) => {
-    console.log('📨 Webhook received:', req.body);
 
+app.post('/webhook', (req, res) => {
+    console.log('📨 Webhook received');
     try {
         const body = req.body;
         const userId = req.headers['x-user-id'] || null;
@@ -628,8 +769,8 @@ app.post('/webhook', (req, res) => {
         if (body?.data?.data && Array.isArray(body.data.data)) {
             const taskId = body.data.task_id || body.task_id || null;
             const clips = body.data.data;
-
             let savedCount = 0;
+
             clips.forEach((clip, index) => {
                 const song = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
@@ -646,6 +787,8 @@ app.post('/webhook', (req, res) => {
                     credits: 12,
                     status: 'success',
                     isShared: false,
+                    likes: 0,
+                    commentsCount: 0,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString()
                 };
@@ -672,14 +815,10 @@ app.post('/webhook', (req, res) => {
             db.save();
             db.addAuditLog('webhook_received', userId || 'system', { count: savedCount });
 
-            return res.status(200).json({
-                received: true,
-                saved: savedCount,
-                total: db.songs.length
-            });
+            return res.status(200).json({ received: true, saved: savedCount });
         }
 
-        res.status(200).json({ received: true, message: 'Acknowledged' });
+        res.status(200).json({ received: true });
     } catch (error) {
         console.error('❌ Webhook error:', error);
         res.status(500).json({ error: 'Webhook processing failed' });
@@ -689,36 +828,38 @@ app.post('/webhook', (req, res) => {
 // ============================================================
 // فحص الصحة
 // ============================================================
+
 app.get('/healthz', (req, res) => {
     res.status(200).json({
         status: 'OK',
         timestamp: new Date().toISOString(),
         usersCount: db.users.length,
         songsCount: db.songs.length,
-        sharedCount: db.sharedSongs.length
+        sharedCount: db.sharedSongs.length,
+        commentsCount: db.comments.length,
+        likesCount: db.likes.length
     });
 });
 
 // ============================================================
 // تشغيل الخادم
 // ============================================================
+
 app.listen(PORT, () => {
     console.log(`✅ الخادم يعمل على المنفذ ${PORT}`);
     console.log(`\n📋 نقاط النهاية المتاحة:`);
-    console.log(`   🔐 POST /api/auth/login      - تسجيل الدخول`);
-    console.log(`   ✨ POST /api/auth/register   - إنشاء حساب`);
-    console.log(`   👤 GET  /api/users/me        - معلومات المستخدم`);
-    console.log(`   🎵 GET  /api/songs           - جلب أغاني المستخدم`);
-    console.log(`   📤 POST /api/songs           - إضافة أغنية جديدة`);
-    console.log(`   🗑️ DELETE /api/songs/:id     - حذف أغنية`);
-    console.log(`   ✏️ PUT  /api/songs/:id       - تحديث أغنية`);
-    console.log(`   🔗 POST /api/songs/:id/share - مشاركة أغنية`);
-    console.log(`   🌐 GET  /api/shared-songs    - الأغاني المشتركة`);
-    console.log(`   📊 GET  /api/stats           - الإحصائيات`);
-    console.log(`   📥 GET  /api/export          - تصدير البيانات`);
-    console.log(`   📨 POST /webhook             - Webhook`);
-    console.log(`   🏠 GET  /healthz             - فحص الصحة`);
+    console.log(`   🔐 POST /api/auth/login           - تسجيل الدخول`);
+    console.log(`   ✨ POST /api/auth/register        - إنشاء حساب`);
+    console.log(`   👤 GET  /api/users/me             - معلومات المستخدم`);
+    console.log(`   🎵 GET  /api/songs                - جلب أغاني المستخدم`);
+    console.log(`   🗑️ DELETE /api/songs/:id          - حذف أغنية`);
+    console.log(`   ✏️ PUT  /api/songs/:id            - تحديث أغنية`);
+    console.log(`   🔗 POST /api/songs/:id/share      - مشاركة أغنية`);
+    console.log(`   🌐 GET  /api/shared-songs         - الأغاني المشتركة`);
+    console.log(`   ❤️ POST /api/shared-songs/:id/like - إعجاب`);
+    console.log(`   💬 POST /api/shared-songs/:id/comments - تعليق`);
+    console.log(`   📊 GET  /api/stats                - الإحصائيات`);
+    console.log(`   📨 POST /webhook                  - Webhook`);
+    console.log(`   🏠 GET  /healthz                  - فحص الصحة`);
     console.log(`\n👑 Admin: admin@example.com / admin123`);
 });
-
-module.exports = app;

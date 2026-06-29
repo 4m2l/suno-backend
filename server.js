@@ -149,7 +149,7 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// إنشاء مستخدم Admin (بدون رصيد افتراضي)
+// إنشاء مستخدم Admin
 // ============================================================
 if (!db.users.find(u => u.username === 'admin')) {
     const admin = {
@@ -232,7 +232,6 @@ app.post('/api/auth/register', (req, res) => {
             return res.status(409).json({ error: 'Email already exists' });
         }
 
-        // لا نضيف رصيداً افتراضياً
         const newUser = {
             id: 'user-' + Date.now(),
             username: username,
@@ -289,12 +288,33 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني
+// نقاط نهاية الأغاني (خاصة بالمستخدم)
 // ============================================================
 
+function getUserSongs(userId) {
+    return db.songs.filter(s => s.userId === userId);
+}
+
+// المسار الرئيسي مع /api
 app.get('/api/songs', authMiddleware, (req, res) => {
     try {
-        const userSongs = db.songs.filter(s => s.userId === req.user.id);
+        const userSongs = getUserSongs(req.user.id);
+        console.log(`📥 جلب أغاني المستخدم ${req.user.id}: ${userSongs.length} أغنية`);
+        res.json({
+            total: userSongs.length,
+            data: userSongs
+        });
+    } catch (error) {
+        console.error('Error fetching songs:', error);
+        res.status(500).json({ error: 'Failed to fetch songs' });
+    }
+});
+
+// المسار بدون /api (نفس السلوك)
+app.get('/songs', authMiddleware, (req, res) => {
+    try {
+        const userSongs = getUserSongs(req.user.id);
+        console.log(`📥 جلب أغاني المستخدم ${req.user.id} (بدون api): ${userSongs.length} أغنية`);
         res.json({
             total: userSongs.length,
             data: userSongs
@@ -474,6 +494,10 @@ app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
         res.status(500).json({ error: 'Failed to unshare song' });
     }
 });
+
+// ============================================================
+// الأغاني المشتركة (عامة)
+// ============================================================
 
 app.get('/api/shared-songs', (req, res) => {
     try {
@@ -724,71 +748,123 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook (تم التصحيح: قراءة userId من query string)
+// Webhook (مع تصحيح وسجلات مفصلة)
 // ============================================================
 
 app.post('/webhook', (req, res) => {
-    console.log('📨 Webhook received');
+    console.log('📨 تم استقبال Webhook');
+    console.log('📦 البايلود:', JSON.stringify(req.body, null, 2));
+    
     try {
         const body = req.body;
-        // التصحيح: قراءة userId من query parameters
         const userId = req.query.userId || null;
+        console.log(`👤 معرف المستخدم من query: ${userId}`);
 
+        // محاولة استخراج البيانات من عدة أماكن مختلفة في البايلود
+        let clips = [];
+        let taskId = null;
+
+        // الهيكل المتوقع من Suno API غالباً: body.data.data
         if (body?.data?.data && Array.isArray(body.data.data)) {
-            const taskId = body.data.task_id || body.task_id || null;
-            const clips = body.data.data;
-            let savedCount = 0;
-
-            clips.forEach((clip, index) => {
-                const song = {
-                    id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
-                    userId: userId,
-                    taskId: taskId || `unknown-${Date.now()}`,
-                    audioId: clip.id || clip.audioId || `clip-${index}`,
-                    audioUrl: clip.audio_url || clip.audioUrl || null,
-                    downloadUrl: clip.audio_url || clip.audioUrl || null,
-                    imageUrl: clip.image_url || clip.imageUrl || null,
-                    title: clip.title || clip.name || 'بدون عنوان',
-                    style: clip.tags || clip.style || clip.genre || '',
-                    prompt: clip.prompt || clip.lyrics || '',
-                    duration: clip.duration || null,
-                    status: 'success',
-                    isShared: false,
-                    likes: 0,
-                    commentsCount: 0,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString()
-                };
-
-                if (song.audioUrl) {
-                    const exists = db.songs.some(s =>
-                        s.taskId === song.taskId && s.audioId === song.audioId
-                    );
-                    if (!exists) {
-                        db.songs.push(song);
-                        savedCount++;
-                        if (userId) {
-                            const user = findUserById(userId);
-                            if (user) {
-                                user.totalSongs = (user.totalSongs || 0) + 1;
-                            }
-                        }
-                        console.log(`✅ تم حفظ الأغنية: ${song.title} للمستخدم ${userId || 'غير معروف'}`);
-                    } else {
-                        console.log(`⏭️ الأغنية مكررة: ${song.title}`);
-                    }
-                }
-            });
-
-            db.save();
-            db.addAuditLog('webhook_received', userId || 'system', { count: savedCount });
-
-            return res.status(200).json({ received: true, saved: savedCount });
+            clips = body.data.data;
+            taskId = body.data.task_id || body.task_id || null;
+            console.log(`📌 استخراج من body.data.data, taskId: ${taskId}`);
+        } 
+        // هيكل بديل: body.data مباشرة
+        else if (body?.data && Array.isArray(body.data)) {
+            clips = body.data;
+            taskId = body.task_id || null;
+            console.log(`📌 استخراج من body.data, taskId: ${taskId}`);
+        }
+        // هيكل بديل: body.clips
+        else if (body?.clips && Array.isArray(body.clips)) {
+            clips = body.clips;
+            taskId = body.task_id || null;
+            console.log(`📌 استخراج من body.clips, taskId: ${taskId}`);
+        }
+        // هيكل بديل: الجسم نفسه مصفوفة
+        else if (Array.isArray(body)) {
+            clips = body;
+            console.log(`📌 استخراج من الجسم الرئيسي (مصفوفة)`);
         }
 
-        res.status(200).json({ received: true });
+        if (clips.length === 0) {
+            console.log('⚠️ لم يتم العثور على أي مقاطع صوتية في البايلود');
+            return res.status(200).json({ received: true, error: 'No clips found' });
+        }
+
+        console.log(`🎵 عدد المقاطع المستلمة: ${clips.length}`);
+        let savedCount = 0;
+
+        clips.forEach((clip, index) => {
+            // محاولة استخراج الرابط من عدة حقول محتملة
+            const audioUrl = clip.audio_url || clip.audioUrl || clip.url || clip.downloadUrl || clip.streamUrl || null;
+            const imageUrl = clip.image_url || clip.imageUrl || clip.coverUrl || clip.cover_url || null;
+            const title = clip.title || clip.name || clip.songName || `مقطع ${index + 1}`;
+            const style = clip.tags || clip.style || clip.genre || '';
+            const duration = clip.duration || clip.duration_sec || null;
+            const prompt = clip.prompt || clip.lyrics || '';
+            
+            // استخراج المعرفات
+            const audioId = clip.id || clip.audioId || clip.clip_id || `clip-${index}`;
+            const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
+
+            console.log(`🔄 معالجة المقطع ${index + 1}: ${title} - رابط: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
+
+            // نحفظ الأغنية حتى لو لم يكن الرابط موجوداً (قد يأتي لاحقاً)
+            // لكن نفضل أن يكون الرابط موجوداً
+            const song = {
+                id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                userId: userId,
+                taskId: clipTaskId,
+                audioId: audioId,
+                audioUrl: audioUrl,
+                downloadUrl: audioUrl || null,
+                imageUrl: imageUrl || null,
+                title: title || 'بدون عنوان',
+                style: style || '',
+                prompt: prompt || '',
+                duration: duration || null,
+                status: audioUrl ? 'success' : 'pending', // إذا لم يكن رابط، نضعها معلقة
+                isShared: false,
+                likes: 0,
+                commentsCount: 0,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+
+            // نتحقق من التكرار باستخدام taskId و audioId
+            const exists = db.songs.some(s =>
+                s.taskId === song.taskId && s.audioId === song.audioId
+            );
+
+            if (!exists) {
+                db.songs.push(song);
+                savedCount++;
+                
+                if (userId) {
+                    const user = findUserById(userId);
+                    if (user) {
+                        user.totalSongs = (user.totalSongs || 0) + 1;
+                        console.log(`✅ تم تحديث عدد أغاني المستخدم ${user.username} إلى ${user.totalSongs}`);
+                    } else {
+                        console.log(`⚠️ المستخدم ذو المعرف ${userId} غير موجود في قاعدة البيانات!`);
+                    }
+                }
+                console.log(`✅ تم حفظ الأغنية: ${song.title} (الحالة: ${song.status})`);
+            } else {
+                console.log(`⏭️ الأغنية مكررة: ${song.title} (${song.taskId}|${song.audioId})`);
+            }
+        });
+
+        db.save();
+        db.addAuditLog('webhook_received', userId || 'system', { count: savedCount });
+
+        console.log(`💾 تم حفظ ${savedCount} أغنية جديدة من أصل ${clips.length}`);
+        return res.status(200).json({ received: true, saved: savedCount });
+
     } catch (error) {
-        console.error('❌ Webhook error:', error);
+        console.error('❌ خطأ في معالجة Webhook:', error);
         res.status(500).json({ error: 'Webhook processing failed' });
     }
 });
@@ -820,6 +896,7 @@ app.listen(PORT, () => {
     console.log(`   ✨ POST /api/auth/register        - إنشاء حساب`);
     console.log(`   👤 GET  /api/users/me             - معلومات المستخدم`);
     console.log(`   🎵 GET  /api/songs                - جلب أغاني المستخدم`);
+    console.log(`   🎵 GET  /songs                    - جلب أغاني المستخدم (بدون api)`);
     console.log(`   🗑️ DELETE /api/songs/:id          - حذف أغنية`);
     console.log(`   ✏️ PUT  /api/songs/:id            - تحديث أغنية`);
     console.log(`   🔗 POST /api/songs/:id/share      - مشاركة أغنية`);

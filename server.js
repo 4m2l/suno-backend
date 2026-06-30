@@ -777,7 +777,7 @@ app.post('/webhook-test', (req, res) => {
 });
 
 // ============================================================
-// Proxy لـ Suno API (مع تحسين حفظ الفيديو)
+// Proxy لـ Suno API (مع تحسين معالجة callBackUrl والأخطاء)
 // ============================================================
 app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     try {
@@ -789,14 +789,18 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
 
         // إزالة apiKey من الجسم قبل الإرسال
         const { apiKey: _, ...payload } = req.body;
-        // ⭐ استخدام INTERNAL_WEBHOOK المعرفة
-        payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
+
+        // ⭐ إضافة callBackUrl فقط للنقاط التي تحتاجها
+        const endpointsWithCallback = ['generate', 'generate/upload-cover', 'mp4/generate', 'voice/generate', 'suno/cover/generate'];
+        if (endpointsWithCallback.includes(endpoint)) {
+            payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
+        }
 
         const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
         console.log(`🔄 Proxy to Suno: ${sunoUrl}`);
         console.log('📦 Payload:', JSON.stringify(payload, null, 2));
 
-        // ⭐ إضافة مهلة 30 ثانية
+        // مهلة 30 ثانية
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -818,7 +822,7 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         console.log(`📊 Proxy response status: ${response.status}`);
         console.log('📊 Proxy response data:', JSON.stringify(data, null, 2));
 
-        // حفظ النتيجة في قاعدة البيانات
+        // حفظ النتيجة في قاعدة البيانات (إذا كانت الاستجابة ناجحة)
         if (response.ok) {
             let clips = [];
             let taskId = data.task_id || data.data?.task_id || null;
@@ -878,13 +882,23 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
                             savedCount++;
                             console.log(`✅ Proxy: تم حفظ الأغنية: ${song.title} - فيديو: ${videoUrl ? '✅' : '❌'}`);
                         } else {
-                            // تحديث الأغنية الموجودة إذا كان هناك فيديو جديد
+                            // تحديث الأغنية الموجودة
                             const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
-                            if (existingSong && videoUrl && !existingSong.videoUrl) {
-                                existingSong.videoUrl = videoUrl;
-                                existingSong.updatedAt = new Date().toISOString();
-                                db.save();
-                                console.log(`🔄 Proxy: تم تحديث الفيديو للأغنية: ${existingSong.title}`);
+                            if (existingSong) {
+                                if (videoUrl && !existingSong.videoUrl) {
+                                    existingSong.videoUrl = videoUrl;
+                                    existingSong.updatedAt = new Date().toISOString();
+                                    db.save();
+                                    console.log(`🔄 Proxy: تم تحديث الفيديو للأغنية: ${existingSong.title}`);
+                                }
+                                // تحديث الحقول الأخرى إذا كانت جديدة
+                                if (audioUrl && !existingSong.audioUrl) {
+                                    existingSong.audioUrl = audioUrl;
+                                    existingSong.downloadUrl = audioUrl;
+                                    existingSong.status = 'success';
+                                    existingSong.updatedAt = new Date().toISOString();
+                                    db.save();
+                                }
                             }
                         }
                     }
@@ -894,10 +908,19 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             }
         }
 
-        res.status(response.status).json(data);
+        // إعادة الرد كما هو، مع إضافة تفاصيل الخطأ إن وجدت
+        if (!response.ok) {
+            // إرجاع رسالة الخطأ من Suno API
+            res.status(response.status).json({
+                error: data?.message || data?.error || 'Suno API error',
+                status: response.status,
+                details: data
+            });
+        } else {
+            res.status(response.status).json(data);
+        }
     } catch (error) {
         console.error('Proxy error:', error);
-        // ⭐ إرجاع رسالة خطأ أكثر وضوحاً
         res.status(500).json({ 
             error: 'Proxy request failed', 
             details: error.message,

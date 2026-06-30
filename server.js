@@ -222,7 +222,7 @@ app.get('/songs-debug', (req, res) => {
     try {
         res.json({
             total: db.songs.length,
-            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status, videoUrl: s.videoUrl }))
+            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status, videoUrl: s.videoUrl, taskId: s.taskId, audioId: s.audioId }))
         });
     } catch (error) {
         res.status(500).json({ error: 'Failed' });
@@ -242,13 +242,13 @@ app.get('/songs/user/:userId', (req, res) => {
 
 app.post('/api/songs', authMiddleware, (req, res) => {
     try {
-        const { title, style, audioUrl, downloadUrl, imageUrl, prompt, duration } = req.body;
+        const { title, style, audioUrl, downloadUrl, imageUrl, prompt, duration, taskId, audioId } = req.body;
         if (!title || !audioUrl) return res.status(400).json({ error: 'Title and audio URL are required' });
         const song = {
             id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
             userId: req.user.id,
-            taskId: 'task-' + Date.now(),
-            audioId: 'audio-' + Date.now(),
+            taskId: taskId || 'task-' + Date.now(),
+            audioId: audioId || 'audio-' + Date.now(),
             title,
             style: style || '',
             audioUrl,
@@ -262,7 +262,12 @@ app.post('/api/songs', authMiddleware, (req, res) => {
             likes: 0,
             commentsCount: 0,
             createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
+            lyrics: null,
+            instrumentalUrl: null,
+            vocalsUrl: null,
+            wavUrl: null,
+            midiUrl: null
         };
         db.songs.push(song);
         req.user.totalSongs = (req.user.totalSongs || 0) + 1;
@@ -300,7 +305,7 @@ app.put('/api/songs/:songId', authMiddleware, (req, res) => {
         const songId = req.params.songId;
         const song = findSongById(songId);
         if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { title, style, prompt, isShared, audioUrl, downloadUrl, imageUrl, duration, status, videoUrl } = req.body;
+        const { title, style, prompt, isShared, audioUrl, downloadUrl, imageUrl, duration, status, videoUrl, lyrics, instrumentalUrl, vocalsUrl, wavUrl, midiUrl } = req.body;
         if (title) song.title = title;
         if (style) song.style = style;
         if (prompt) song.prompt = prompt;
@@ -311,6 +316,11 @@ app.put('/api/songs/:songId', authMiddleware, (req, res) => {
         if (duration) song.duration = duration;
         if (status) song.status = status;
         if (videoUrl) song.videoUrl = videoUrl;
+        if (lyrics) song.lyrics = lyrics;
+        if (instrumentalUrl) song.instrumentalUrl = instrumentalUrl;
+        if (vocalsUrl) song.vocalsUrl = vocalsUrl;
+        if (wavUrl) song.wavUrl = wavUrl;
+        if (midiUrl) song.midiUrl = midiUrl;
         song.updatedAt = new Date().toISOString();
         db.save();
         db.addAuditLog('song_updated', req.user.id, { title: song.title });
@@ -327,7 +337,7 @@ app.post('/api/songs/update/:songId', authMiddleware, (req, res) => {
         const songId = req.params.songId;
         const song = findSongById(songId);
         if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { audioUrl, downloadUrl, imageUrl, duration, status, videoUrl } = req.body;
+        const { audioUrl, downloadUrl, imageUrl, duration, status, videoUrl, lyrics, instrumentalUrl, vocalsUrl, wavUrl, midiUrl } = req.body;
         let updated = false;
         if (audioUrl && audioUrl.startsWith('https://')) {
             song.audioUrl = audioUrl;
@@ -339,17 +349,19 @@ app.post('/api/songs/update/:songId', authMiddleware, (req, res) => {
         if (imageUrl) song.imageUrl = imageUrl;
         if (duration) song.duration = duration;
         if (status) song.status = status;
-        if (videoUrl) {
-            song.videoUrl = videoUrl;
-            updated = true;
-        }
+        if (videoUrl) { song.videoUrl = videoUrl; updated = true; }
+        if (lyrics) { song.lyrics = lyrics; updated = true; }
+        if (instrumentalUrl) { song.instrumentalUrl = instrumentalUrl; updated = true; }
+        if (vocalsUrl) { song.vocalsUrl = vocalsUrl; updated = true; }
+        if (wavUrl) { song.wavUrl = wavUrl; updated = true; }
+        if (midiUrl) { song.midiUrl = midiUrl; updated = true; }
         if (updated) {
             song.updatedAt = new Date().toISOString();
             db.save();
             db.addAuditLog('song_updated_manually', req.user.id, { title: song.title });
             res.json({ success: true, message: 'Song updated', song });
         } else {
-            res.json({ success: false, message: 'No valid audio URL provided' });
+            res.json({ success: false, message: 'No valid data provided' });
         }
     } catch (error) {
         console.error('Error updating song manually:', error);
@@ -628,6 +640,11 @@ app.post('/webhook', (req, res) => {
             const audioId = clip.id || clip.audioId || clip.clip_id || clip.audio_id || `clip-${index}`;
             const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
             const videoUrl = clip.video_url || clip.videoUrl || null;
+            const lyrics = clip.lyrics || clip.text || null;
+            const instrumentalUrl = clip.instrumental_url || clip.instrumentalUrl || null;
+            const vocalsUrl = clip.vocals_url || clip.vocalsUrl || null;
+            const wavUrl = clip.wav_url || clip.wavUrl || null;
+            const midiUrl = clip.midi_url || clip.midiUrl || null;
 
             console.log(`🔄 [WEBHOOK] المقطع ${index + 1}: "${title}" - رابط: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
 
@@ -641,10 +658,12 @@ app.post('/webhook', (req, res) => {
                     existingSong.status = 'success';
                     updated = true;
                 }
-                if (videoUrl && !existingSong.videoUrl) {
-                    existingSong.videoUrl = videoUrl;
-                    updated = true;
-                }
+                if (videoUrl && !existingSong.videoUrl) { existingSong.videoUrl = videoUrl; updated = true; }
+                if (lyrics && !existingSong.lyrics) { existingSong.lyrics = lyrics; updated = true; }
+                if (instrumentalUrl && !existingSong.instrumentalUrl) { existingSong.instrumentalUrl = instrumentalUrl; updated = true; }
+                if (vocalsUrl && !existingSong.vocalsUrl) { existingSong.vocalsUrl = vocalsUrl; updated = true; }
+                if (wavUrl && !existingSong.wavUrl) { existingSong.wavUrl = wavUrl; updated = true; }
+                if (midiUrl && !existingSong.midiUrl) { existingSong.midiUrl = midiUrl; updated = true; }
                 if (imageUrl) existingSong.imageUrl = imageUrl;
                 if (duration) existingSong.duration = duration;
                 if (title) existingSong.title = title;
@@ -673,7 +692,12 @@ app.post('/webhook', (req, res) => {
                     likes: 0,
                     commentsCount: 0,
                     createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString()
+                    updatedAt: new Date().toISOString(),
+                    lyrics: lyrics || null,
+                    instrumentalUrl: instrumentalUrl || null,
+                    vocalsUrl: vocalsUrl || null,
+                    wavUrl: wavUrl || null,
+                    midiUrl: midiUrl || null
                 };
                 db.songs.push(song);
                 savedCount++;
@@ -717,7 +741,12 @@ app.post('/webhook-test', (req, res) => {
                     style: 'pop, test',
                     duration: 180,
                     image_url: 'https://via.placeholder.com/300x300/1a1a2e/ffffff?text=Test',
-                    video_url: 'https://example.com/test-video-' + Date.now() + '.mp4'
+                    video_url: 'https://example.com/test-video-' + Date.now() + '.mp4',
+                    lyrics: 'هذه كلمات اختبارية للأغنية',
+                    instrumental_url: 'https://example.com/test-instrumental.mp3',
+                    vocals_url: 'https://example.com/test-vocals.mp3',
+                    wav_url: 'https://example.com/test.wav',
+                    midi_url: 'https://example.com/test.midi'
                 }
             ],
             task_id: 'test-task-' + Date.now()
@@ -742,23 +771,114 @@ app.post('/webhook-test', (req, res) => {
 });
 
 // ============================================================
-// نقطة نهاية للتحقق من حالة مهمة من Suno API
+// نقاط نهاية جديدة للميزات المتقدمة (Proxy للـ Suno API)
 // ============================================================
-app.post('/api/songs/check-status/:taskId', authMiddleware, async (req, res) => {
+app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     try {
-        const taskId = req.params.taskId;
-        const apiKey = req.body.apiKey;
-        if (!apiKey) return res.status(400).json({ error: 'API Key required' });
+        const endpoint = req.params.endpoint;
+        const apiKey = req.body.apiKey || req.headers['x-api-key'];
+        if (!apiKey) {
+            return res.status(400).json({ error: 'API Key required' });
+        }
 
-        const response = await fetch(`https://api.sunoapi.org/api/v1/generate/status?taskId=${taskId}`, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${apiKey}` }
+        // إزالة apiKey من الجسم قبل الإرسال
+        const { apiKey: _, ...payload } = req.body;
+        payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
+
+        const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
+        console.log(`🔄 Proxy to Suno: ${sunoUrl}`);
+
+        const response = await fetch(sunoUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
         });
-        const data = await response.json();
-        res.json(data);
+
+        let data = null;
+        try { data = await response.json(); } catch (e) {}
+
+        // حفظ النتيجة في قاعدة البيانات إذا كانت تحتوي على بيانات مفيدة
+        if (response.ok && data?.data?.data && Array.isArray(data.data.data)) {
+            const clips = data.data.data;
+            const taskId = data.data.task_id || data.task_id || null;
+            clips.forEach(clip => {
+                const audioUrl = clip.audio_url || clip.audioUrl || null;
+                if (audioUrl) {
+                    const audioId = clip.id || clip.audioId || `clip-${Date.now()}`;
+                    const existing = db.songs.some(s => s.taskId === taskId && s.audioId === audioId);
+                    if (!existing) {
+                        const song = {
+                            id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                            userId: req.user.id,
+                            taskId: taskId || 'task-' + Date.now(),
+                            audioId: audioId,
+                            audioUrl: audioUrl,
+                            downloadUrl: clip.audio_url || clip.audioUrl || audioUrl,
+                            imageUrl: clip.image_url || clip.imageUrl || null,
+                            title: clip.title || clip.name || 'بدون عنوان',
+                            style: clip.tags || clip.style || clip.genre || '',
+                            prompt: clip.prompt || clip.lyrics || '',
+                            duration: clip.duration || null,
+                            videoUrl: clip.video_url || clip.videoUrl || null,
+                            status: 'success',
+                            isShared: false,
+                            likes: 0,
+                            commentsCount: 0,
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                            lyrics: clip.lyrics || null,
+                            instrumentalUrl: clip.instrumental_url || clip.instrumentalUrl || null,
+                            vocalsUrl: clip.vocals_url || clip.vocalsUrl || null,
+                            wavUrl: clip.wav_url || clip.wavUrl || null,
+                            midiUrl: clip.midi_url || clip.midiUrl || null
+                        };
+                        db.songs.push(song);
+                        const user = findUserById(req.user.id);
+                        if (user) user.totalSongs = (user.totalSongs || 0) + 1;
+                        db.save();
+                        console.log(`✅ تم حفظ الأغنية من الـ Proxy: ${song.title}`);
+                    }
+                }
+            });
+        }
+
+        res.status(response.status).json(data);
     } catch (error) {
-        console.error('Error checking status:', error);
-        res.status(500).json({ error: 'Failed to check status' });
+        console.error('Proxy error:', error);
+        res.status(500).json({ error: 'Proxy request failed' });
+    }
+});
+
+// نقطة نهاية GET للـ Proxy (لـ record-info)
+app.get('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
+    try {
+        const endpoint = req.params.endpoint;
+        const apiKey = req.headers['x-api-key'];
+        if (!apiKey) {
+            return res.status(400).json({ error: 'API Key required' });
+        }
+
+        const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
+        console.log(`🔄 Proxy GET to Suno: ${sunoUrl}`);
+
+        const response = await fetch(sunoUrl, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        let data = null;
+        try { data = await response.json(); } catch (e) {}
+
+        res.status(response.status).json(data);
+    } catch (error) {
+        console.error('Proxy GET error:', error);
+        res.status(500).json({ error: 'Proxy request failed' });
     }
 });
 
@@ -785,11 +905,14 @@ app.listen(PORT, () => {
     console.log(`📋 Endpoints:`);
     console.log(`   🔐 POST /api/auth/login`);
     console.log(`   ✨ POST /api/auth/register`);
+    console.log(`   👤 GET  /api/users/me`);
     console.log(`   🎵 GET  /api/songs (auth required)`);
     console.log(`   🎵 GET  /songs-debug (public, debug)`);
     console.log(`   🎵 GET  /songs/user/:userId (public, debug)`);
     console.log(`   📨 POST /webhook (Suno callback)`);
     console.log(`   🧪 POST /webhook-test?userId=xxx (test webhook)`);
+    console.log(`   🔄 POST /api/proxy/suno/:endpoint (proxy to Suno API)`);
+    console.log(`   🔄 GET  /api/proxy/suno/:endpoint (proxy GET to Suno API)`);
     console.log(`   🏠 GET  /healthz`);
     console.log(`👑 Admin: admin@example.com / admin123`);
 });

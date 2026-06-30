@@ -601,7 +601,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// ⭐ Webhook المحسّن (يدعم جميع أنواع الردود ويستخدم tempTaskId)
+// ⭐ Webhook المحسّن (يدعم جميع أنواع الردود)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
@@ -611,7 +611,7 @@ app.post('/webhook', (req, res) => {
     try {
         const body = req.body;
         const userId = req.query.userId || null;
-        const tempTaskId = req.query.tempTaskId || null; // المفتاح المؤقت من Proxy
+        const tempTaskId = req.query.tempTaskId || null;
         console.log(`👤 [WEBHOOK] userId: ${userId}, tempTaskId: ${tempTaskId}`);
 
         let clips = [];
@@ -645,7 +645,6 @@ app.post('/webhook', (req, res) => {
                     pendingSong.wavUrl = wavUrl;
                     pendingSong.status = 'success';
                     pendingSong.updatedAt = new Date().toISOString();
-                    // تحديث taskId الحقيقي
                     if (taskId) pendingSong.taskId = taskId;
                     db.save();
                     console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية: ${pendingSong.title} (tempTaskId: ${tempTaskId})`);
@@ -653,7 +652,6 @@ app.post('/webhook', (req, res) => {
                 }
             }
             
-            // إذا لم يتم العثور، نحاول البحث باستخدام taskId الحقيقي
             if (!found && taskId) {
                 const existing = db.songs.find(s => s.taskId === taskId || s.taskId.includes(taskId) || taskId.includes(s.taskId));
                 if (existing) {
@@ -666,7 +664,6 @@ app.post('/webhook', (req, res) => {
                 }
             }
             
-            // إذا لم يتم العثور، ننشئ سجلاً جديداً
             if (!found) {
                 const newSong = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
@@ -776,19 +773,17 @@ app.post('/webhook', (req, res) => {
             return res.status(200).json({ received: true, saved: 1, type: 'video' });
         }
         // ============================================================
-        // ⭐ الحالة 4: فصل الصوت (vocal-removal) - قد يحتوي على instrumentals و vocals
+        // ⭐ الحالة 4: فصل الصوت (vocal-removal)
         // ============================================================
-        else if (body?.data?.vocal_removal_info) {
-            const removalData = body.data.vocal_removal_info;
+        else if (body?.data?.vocal_removal_info || body?.data?.instrumental_url || body?.data?.vocal_url) {
             // قد يكون الهيكل مختلفاً حسب الرد
             const audioUrl = body.data.audio_url || null;
             const instrumental = body.data.instrumental_url || null;
             const vocal = body.data.vocal_url || null;
             taskId = body.data.task_id || body.task_id || null;
             
-            console.log(`🎤 [WEBHOOK] حالة فصل الصوت: audio=${audioUrl}, instrumental=${instrumental}, vocal=${vocal}`);
+            console.log(`🎤 [WEBHOOK] حالة فصل الصوت: instrumental=${instrumental}, vocal=${vocal}`);
             
-            // البحث عن السجل المعلق
             let found = false;
             if (tempTaskId) {
                 const pendingSong = db.songs.find(s => s.taskId === tempTaskId && s.userId === userId);
@@ -820,7 +815,6 @@ app.post('/webhook', (req, res) => {
             }
             
             if (!found) {
-                // إنشاء سجل جديد
                 const newSong = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                     userId: userId,
@@ -882,7 +876,6 @@ app.post('/webhook', (req, res) => {
             }
             
             if (wavUrl || videoUrl || instrumentalUrl || vocalsUrl) {
-                // محاولة تحديث السجل المعلق
                 let found = false;
                 if (tempTaskId) {
                     const pendingSong = db.songs.find(s => s.taskId === tempTaskId && s.userId === userId);
@@ -914,7 +907,6 @@ app.post('/webhook', (req, res) => {
                     }
                 }
                 if (!found) {
-                    // إنشاء سجل جديد
                     const newSong = {
                         id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                         userId: userId,
@@ -989,7 +981,7 @@ app.post('/webhook', (req, res) => {
             console.log(`   - الفيديو: ${videoUrl ? '✅' : '❌'}`);
             console.log(`   - الصورة: ${imageUrl ? '✅' : '❌'}`);
 
-            // محاولة العثور على السجل المعلق باستخدام tempTaskId أو taskId
+            // البحث عن السجل المعلق
             let existingSong = null;
             if (tempTaskId) {
                 existingSong = db.songs.find(s => s.taskId === tempTaskId && s.userId === userId);
@@ -1003,63 +995,93 @@ app.post('/webhook', (req, res) => {
 
             if (existingSong) {
                 let updated = false;
+                const wasPending = existingSong.status === 'pending' || existingSong.title.includes('جاري المعالجة');
+
+                // ⭐ تحديث العنوان إذا كان مؤقتاً
+                if (title && (existingSong.title.includes('جاري المعالجة') || existingSong.title === 'بدون عنوان')) {
+                    existingSong.title = title;
+                    updated = true;
+                    console.log(`🔄 [WEBHOOK] تم تحديث العنوان إلى: ${title}`);
+                }
+
                 if (audioUrl && !existingSong.audioUrl) {
                     existingSong.audioUrl = audioUrl;
                     existingSong.downloadUrl = audioUrl;
-                    existingSong.status = 'success';
                     updated = true;
                 }
+
                 if (videoUrl && !existingSong.videoUrl) {
                     existingSong.videoUrl = videoUrl;
                     updated = true;
                     console.log(`🎬 [WEBHOOK] تم تحديث الفيديو: ${videoUrl}`);
                 }
+
                 if (lyrics && !existingSong.lyrics) {
                     existingSong.lyrics = lyrics;
                     updated = true;
                 }
+
                 if (instrumentalUrl && !existingSong.instrumentalUrl) {
                     existingSong.instrumentalUrl = instrumentalUrl;
                     updated = true;
                 }
+
                 if (vocalsUrl && !existingSong.vocalsUrl) {
                     existingSong.vocalsUrl = vocalsUrl;
                     updated = true;
                 }
+
                 if (wavUrl && !existingSong.wavUrl) {
                     existingSong.wavUrl = wavUrl;
                     updated = true;
                 }
+
                 if (midiUrl && !existingSong.midiUrl) {
                     existingSong.midiUrl = midiUrl;
                     updated = true;
                 }
+
                 if (imageUrl && !existingSong.imageUrl) {
                     existingSong.imageUrl = imageUrl;
                     updated = true;
                 }
+
                 if (duration && !existingSong.duration) {
                     existingSong.duration = duration;
                     updated = true;
                 }
-                if (title && !existingSong.title) {
-                    existingSong.title = title;
-                    updated = true;
-                }
+
                 if (style && !existingSong.style) {
                     existingSong.style = style;
                     updated = true;
                 }
+
+                // ⭐ تحديث taskId إذا كان مؤقتاً
+                if (clipTaskId && existingSong.taskId && existingSong.taskId.startsWith('temp-')) {
+                    existingSong.taskId = clipTaskId;
+                    updated = true;
+                    console.log(`🔄 [WEBHOOK] تم تحديث taskId إلى: ${clipTaskId}`);
+                }
+
+                // ⭐ تحديث audioId إذا كان pending
+                if (audioId && existingSong.audioId && existingSong.audioId.startsWith('pending-')) {
+                    existingSong.audioId = audioId;
+                    updated = true;
+                }
+
+                // ⭐ تحديث الحالة إلى success
+                if (audioUrl || videoUrl) {
+                    existingSong.status = 'success';
+                    updated = true;
+                }
+
                 if (updated) {
                     existingSong.updatedAt = new Date().toISOString();
-                    // تحديث taskId إذا كان مختلفاً
-                    if (clipTaskId && !existingSong.taskId.startsWith('temp-') && existingSong.taskId !== clipTaskId) {
-                        existingSong.taskId = clipTaskId;
-                    }
                     updatedCount++;
-                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}"`);
+                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}" (الحالة: ${existingSong.status})`);
                 }
             } else {
+                // إنشاء سجل جديد
                 const song = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                     userId: userId,
@@ -1125,7 +1147,6 @@ app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
         const tempTaskId = `temp-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
         if (endpointsWithCallback.includes(endpoint)) {
-            // إضافة tempTaskId إلى callBackUrl
             payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}&tempTaskId=${tempTaskId}`;
         }
 
@@ -1235,7 +1256,7 @@ app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
                     const song = {
                         id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                         userId: req.user.id,
-                        taskId: tempTaskId, // نستخدم المعرف المؤقت هنا
+                        taskId: tempTaskId,
                         audioId: audioId,
                         audioUrl: null,
                         downloadUrl: null,

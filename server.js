@@ -55,11 +55,20 @@ const CONFIG = {
 };
 
 // ============================================================
-// قاعدة البيانات
+// قاعدة البيانات (موسعة)
 // ============================================================
 class Database {
     constructor() {
-        this.data = { users: [], songs: [], sharedSongs: [], comments: [], likes: [], auditLogs: [] };
+        this.data = {
+            users: [],
+            songs: [],
+            sharedSongs: [],
+            comments: [],
+            likes: [],
+            auditLogs: [],
+            follows: [],
+            notifications: []
+        };
         this.load();
     }
     load() {
@@ -87,6 +96,11 @@ class Database {
     set likes(v) { this.data.likes = v; this.save(); }
     get auditLogs() { return this.data.auditLogs; }
     set auditLogs(v) { this.data.auditLogs = v; this.save(); }
+    get follows() { return this.data.follows || []; }
+    set follows(v) { this.data.follows = v; this.save(); }
+    get notifications() { return this.data.notifications || []; }
+    set notifications(v) { this.data.notifications = v; this.save(); }
+
     addAuditLog(action, userId, details) {
         this.auditLogs.push({
             id: crypto.randomBytes(8).toString('hex'),
@@ -96,6 +110,20 @@ class Database {
             timestamp: new Date().toISOString()
         });
         if (this.auditLogs.length > 1000) this.auditLogs = this.auditLogs.slice(-1000);
+        this.save();
+    }
+
+    addNotification(userId, type, message, data = {}) {
+        this.notifications.push({
+            id: crypto.randomBytes(8).toString('hex'),
+            userId: userId,
+            type: type,
+            message: message,
+            data: data,
+            read: false,
+            createdAt: new Date().toISOString()
+        });
+        if (this.notifications.length > 500) this.notifications = this.notifications.slice(-500);
         this.save();
     }
 }
@@ -109,6 +137,7 @@ function hashPassword(p) { return crypto.createHash('sha256').update(p).digest('
 function generateToken() { return 'sk-' + crypto.randomBytes(32).toString('hex'); }
 function findUserByEmail(email) { return db.users.find(u => u.email.toLowerCase() === email.toLowerCase()); }
 function findUserById(id) { return db.users.find(u => u.id === id); }
+function findUserByUsername(username) { return db.users.find(u => u.username.toLowerCase() === username.toLowerCase()); }
 function findUserByToken(token) { return db.users.find(u => u.apiKey === token); }
 function findSongById(id) { return db.songs.find(s => s.id === id); }
 function findSharedSongById(id) { return db.sharedSongs.find(s => s.id === id); }
@@ -129,27 +158,44 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// إنشاء Admin
+// إنشاء Admin (مع إضافة الحساب الجديد)
 // ============================================================
-if (!db.users.find(u => u.username === 'admin')) {
-    const admin = {
-        id: 'admin-' + crypto.randomBytes(4).toString('hex'),
-        username: 'admin',
-        email: 'admin@example.com',
-        password: hashPassword('admin123'),
-        apiKey: generateToken(),
-        createdAt: new Date().toISOString(),
-        totalSongs: 0,
-        isActive: true,
-        role: 'admin'
-    };
-    db.users.push(admin);
-    db.save();
-    console.log('👑 Admin created: admin@example.com / admin123');
-}
+const adminCredentials = [
+    { username: 'admin', email: 'admin@example.com', password: 'admin123' },
+    { username: 'MS PRODUCTIONS', email: 'info@msproductions.com', password: 'Msm12345' }
+];
+
+adminCredentials.forEach(cred => {
+    if (!db.users.find(u => u.email.toLowerCase() === cred.email.toLowerCase())) {
+        const admin = {
+            id: 'admin-' + crypto.randomBytes(4).toString('hex'),
+            username: cred.username,
+            email: cred.email.toLowerCase(),
+            password: hashPassword(cred.password),
+            apiKey: generateToken(),
+            createdAt: new Date().toISOString(),
+            totalSongs: 0,
+            isActive: true,
+            role: 'admin',
+            bio: cred.username === 'MS PRODUCTIONS' ? '🎵 MS PRODUCTIONS - إنتاج موسيقي احترافي' : 'مدير النظام',
+            profileImage: null,
+            followers: 0,
+            following: 0,
+            settings: {
+                emailNotifications: true,
+                commentNotifications: true,
+                likeNotifications: true,
+                followNotifications: true
+            }
+        };
+        db.users.push(admin);
+        db.save();
+        console.log(`👑 Admin created: ${cred.email} / ${cred.password}`);
+    }
+});
 
 // ============================================================
-// نقاط نهاية المصادقة (نفسها بدون تغيير)
+// نقاط نهاية المصادقة
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
@@ -170,7 +216,13 @@ app.post('/api/auth/login', (req, res) => {
                 username: user.username,
                 email: user.email,
                 totalSongs: user.totalSongs || 0,
-                apiKey: token
+                apiKey: token,
+                role: user.role || 'user',
+                profileImage: user.profileImage || null,
+                bio: user.bio || '',
+                followers: db.follows.filter(f => f.followingId === user.id).length,
+                following: db.follows.filter(f => f.followerId === user.id).length,
+                unreadNotifications: db.notifications.filter(n => n.userId === user.id && !n.read).length
             }
         });
     } catch (error) {
@@ -185,6 +237,8 @@ app.post('/api/auth/register', (req, res) => {
         if (!username || !email || !password) return res.status(400).json({ error: 'All fields required' });
         if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
         if (findUserByEmail(email)) return res.status(409).json({ error: 'Email already exists' });
+        if (findUserByUsername(username)) return res.status(409).json({ error: 'Username already taken' });
+
         const newUser = {
             id: 'user-' + Date.now(),
             username,
@@ -194,7 +248,17 @@ app.post('/api/auth/register', (req, res) => {
             createdAt: new Date().toISOString(),
             totalSongs: 0,
             isActive: true,
-            role: 'user'
+            role: 'user',
+            bio: '',
+            profileImage: null,
+            followers: 0,
+            following: 0,
+            settings: {
+                emailNotifications: true,
+                commentNotifications: true,
+                likeNotifications: true,
+                followNotifications: true
+            }
         };
         db.users.push(newUser);
         db.save();
@@ -202,7 +266,18 @@ app.post('/api/auth/register', (req, res) => {
         res.status(201).json({
             success: true,
             message: 'Account created',
-            user: { id: newUser.id, username: newUser.username, email: newUser.email, apiKey: newUser.apiKey }
+            user: {
+                id: newUser.id,
+                username: newUser.username,
+                email: newUser.email,
+                apiKey: newUser.apiKey,
+                role: newUser.role,
+                profileImage: null,
+                bio: '',
+                followers: 0,
+                following: 0,
+                unreadNotifications: 0
+            }
         });
     } catch (error) {
         console.error('Register error:', error);
@@ -212,7 +287,20 @@ app.post('/api/auth/register', (req, res) => {
 
 app.get('/api/users/me', authMiddleware, (req, res) => {
     const user = req.user;
-    res.json({ id: user.id, username: user.username, email: user.email, totalSongs: user.totalSongs || 0, createdAt: user.createdAt });
+    res.json({
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        totalSongs: user.totalSongs || 0,
+        createdAt: user.createdAt,
+        role: user.role || 'user',
+        profileImage: user.profileImage || null,
+        bio: user.bio || '',
+        followers: db.follows.filter(f => f.followingId === user.id).length,
+        following: db.follows.filter(f => f.followerId === user.id).length,
+        settings: user.settings || { emailNotifications: true, commentNotifications: true, likeNotifications: true, followNotifications: true },
+        unreadNotifications: db.notifications.filter(n => n.userId === user.id && !n.read).length
+    });
 });
 
 app.post('/api/auth/logout', authMiddleware, (req, res) => {
@@ -228,7 +316,275 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني (خاصة بالمستخدم) - نفسها بدون تغيير
+// نقاط نهاية الملف الشخصي
+// ============================================================
+app.get('/api/users/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const user = findUserById(userId);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const followers = db.follows.filter(f => f.followingId === user.id);
+        const following = db.follows.filter(f => f.followerId === user.id);
+        const publicSongs = db.songs.filter(s => s.userId === user.id && s.isShared === true);
+        const isFollowing = req.headers.authorization ? db.follows.some(f => f.followerId === req.user?.id && f.followingId === user.id) : false;
+
+        res.json({
+            id: user.id,
+            username: user.username,
+            bio: user.bio || '',
+            profileImage: user.profileImage || null,
+            createdAt: user.createdAt,
+            totalSongs: user.totalSongs || 0,
+            followersCount: followers.length,
+            followingCount: following.length,
+            isFollowing: isFollowing,
+            publicSongs: publicSongs.map(s => ({
+                id: s.id,
+                title: s.title,
+                style: s.style,
+                audioUrl: s.audioUrl,
+                videoUrl: s.videoUrl,
+                imageUrl: s.imageUrl,
+                duration: s.duration,
+                createdAt: s.createdAt,
+                likes: db.likes.filter(l => l.sharedSongId === s.id).length,
+                comments: db.comments.filter(c => c.sharedSongId === s.id).length
+            }))
+        });
+    } catch (error) {
+        console.error('Error fetching user:', error);
+        res.status(500).json({ error: 'Failed to fetch user' });
+    }
+});
+
+app.put('/api/users/profile', authMiddleware, (req, res) => {
+    try {
+        const user = req.user;
+        const { bio, profileImage, email, password } = req.body;
+
+        if (bio !== undefined) user.bio = bio;
+        if (profileImage !== undefined) user.profileImage = profileImage;
+        if (email && email !== user.email) {
+            if (findUserByEmail(email)) {
+                return res.status(409).json({ error: 'Email already exists' });
+            }
+            user.email = email.toLowerCase();
+        }
+        if (password) {
+            if (password.length < 6) {
+                return res.status(400).json({ error: 'Password must be at least 6 characters' });
+            }
+            user.password = hashPassword(password);
+        }
+
+        user.updatedAt = new Date().toISOString();
+        db.save();
+        db.addAuditLog('profile_updated', user.id, { email: user.email });
+
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                bio: user.bio,
+                profileImage: user.profileImage,
+                followers: db.follows.filter(f => f.followingId === user.id).length,
+                following: db.follows.filter(f => f.followerId === user.id).length
+            }
+        });
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        res.status(500).json({ error: 'Failed to update profile' });
+    }
+});
+
+// ============================================================
+// نقاط نهاية المتابعة
+// ============================================================
+app.post('/api/users/:userId/follow', authMiddleware, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const follower = req.user;
+
+        if (userId === follower.id) {
+            return res.status(400).json({ error: 'Cannot follow yourself' });
+        }
+
+        const targetUser = findUserById(userId);
+        if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+        const existing = db.follows.find(f => f.followerId === follower.id && f.followingId === userId);
+        if (existing) {
+            return res.status(400).json({ error: 'Already following' });
+        }
+
+        const follow = {
+            id: 'follow-' + Date.now(),
+            followerId: follower.id,
+            followingId: userId,
+            createdAt: new Date().toISOString()
+        };
+        db.follows.push(follow);
+        db.save();
+
+        db.addNotification(userId, 'follow', `${follower.username} بدأ بمتابعتك`, {
+            followerId: follower.id,
+            followerUsername: follower.username
+        });
+
+        db.addAuditLog('user_followed', follower.id, { followingId: userId });
+
+        res.json({
+            success: true,
+            followersCount: db.follows.filter(f => f.followingId === userId).length
+        });
+    } catch (error) {
+        console.error('Error following user:', error);
+        res.status(500).json({ error: 'Failed to follow user' });
+    }
+});
+
+app.delete('/api/users/:userId/follow', authMiddleware, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const follower = req.user;
+
+        const index = db.follows.findIndex(f => f.followerId === follower.id && f.followingId === userId);
+        if (index === -1) {
+            return res.status(400).json({ error: 'Not following' });
+        }
+
+        db.follows.splice(index, 1);
+        db.save();
+
+        db.addAuditLog('user_unfollowed', follower.id, { followingId: userId });
+
+        res.json({
+            success: true,
+            followersCount: db.follows.filter(f => f.followingId === userId).length
+        });
+    } catch (error) {
+        console.error('Error unfollowing user:', error);
+        res.status(500).json({ error: 'Failed to unfollow user' });
+    }
+});
+
+app.get('/api/users/:userId/followers', authMiddleware, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const followers = db.follows.filter(f => f.followingId === userId);
+        const users = followers.map(f => {
+            const user = findUserById(f.followerId);
+            return user ? {
+                id: user.id,
+                username: user.username,
+                profileImage: user.profileImage || null
+            } : null;
+        }).filter(u => u);
+
+        res.json({ data: users });
+    } catch (error) {
+        console.error('Error fetching followers:', error);
+        res.status(500).json({ error: 'Failed to fetch followers' });
+    }
+});
+
+app.get('/api/users/:userId/following', authMiddleware, (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const following = db.follows.filter(f => f.followerId === userId);
+        const users = following.map(f => {
+            const user = findUserById(f.followingId);
+            return user ? {
+                id: user.id,
+                username: user.username,
+                profileImage: user.profileImage || null
+            } : null;
+        }).filter(u => u);
+
+        res.json({ data: users });
+    } catch (error) {
+        console.error('Error fetching following:', error);
+        res.status(500).json({ error: 'Failed to fetch following' });
+    }
+});
+
+// ============================================================
+// نقاط نهاية الإشعارات
+// ============================================================
+app.get('/api/notifications', authMiddleware, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const limit = parseInt(req.query.limit) || 50;
+        const unreadOnly = req.query.unread === 'true';
+
+        let notifications = db.notifications.filter(n => n.userId === userId);
+        if (unreadOnly) {
+            notifications = notifications.filter(n => !n.read);
+        }
+        notifications.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+        notifications = notifications.slice(0, limit);
+
+        const enhanced = notifications.map(n => {
+            let extra = { ...n };
+            if (n.data && n.data.followerId) {
+                const user = findUserById(n.data.followerId);
+                if (user) {
+                    extra.data.followerUsername = user.username;
+                    extra.data.followerProfileImage = user.profileImage || null;
+                }
+            }
+            if (n.data && n.data.commentId) {
+                const comment = db.comments.find(c => c.id === n.data.commentId);
+                if (comment) {
+                    extra.data.commentText = comment.text;
+                }
+            }
+            return extra;
+        });
+
+        res.json({
+            total: db.notifications.filter(n => n.userId === userId).length,
+            unread: db.notifications.filter(n => n.userId === userId && !n.read).length,
+            data: enhanced
+        });
+    } catch (error) {
+        console.error('Error fetching notifications:', error);
+        res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+});
+
+app.put('/api/notifications/:notificationId/read', authMiddleware, (req, res) => {
+    try {
+        const notificationId = req.params.notificationId;
+        const notification = db.notifications.find(n => n.id === notificationId && n.userId === req.user.id);
+        if (!notification) return res.status(404).json({ error: 'Notification not found' });
+
+        notification.read = true;
+        db.save();
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error marking notification as read:', error);
+        res.status(500).json({ error: 'Failed to mark notification as read' });
+    }
+});
+
+app.put('/api/notifications/read-all', authMiddleware, (req, res) => {
+    try {
+        db.notifications.filter(n => n.userId === req.user.id && !n.read).forEach(n => n.read = true);
+        db.save();
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error marking all notifications as read:', error);
+        res.status(500).json({ error: 'Failed to mark all notifications as read' });
+    }
+});
+
+// ============================================================
+// نقاط نهاية الأغاني (خاصة بالمستخدم) - مع إضافة الإشعارات
 // ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
@@ -245,163 +601,151 @@ app.get('/api/songs', authMiddleware, (req, res) => {
     }
 });
 
-app.get('/songs-debug', (req, res) => {
+// ============================================================
+// الأغاني المشتركة (عامة) - مع معلومات المستخدم
+// ============================================================
+app.get('/api/shared-songs', (req, res) => {
     try {
-        res.json({
-            total: db.songs.length,
-            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status, videoUrl: s.videoUrl, taskId: s.taskId, audioId: s.audioId, wavUrl: s.wavUrl, midiUrl: s.midiUrl, lyrics: s.lyrics }))
+        const limit = parseInt(req.query.limit) || 50;
+        const shared = db.sharedSongs
+            .sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt))
+            .slice(0, limit);
+
+        const result = shared.map(s => {
+            const user = findUserById(s.userId);
+            const likes = db.likes.filter(l => l.sharedSongId === s.id).length;
+            const comments = db.comments.filter(c => c.sharedSongId === s.id).length;
+            return {
+                ...s,
+                likes,
+                commentsCount: comments,
+                userLiked: false,
+                userProfileImage: user?.profileImage || null,
+                username: user?.username || 'Unknown'
+            };
         });
+        res.json({ total: db.sharedSongs.length, data: result });
     } catch (error) {
-        res.status(500).json({ error: 'Failed' });
+        console.error('Error fetching shared songs:', error);
+        res.status(500).json({ error: 'Failed to fetch shared songs' });
     }
 });
 
-app.get('/songs/user/:userId', (req, res) => {
+// ============================================================
+// الإعجابات والتعليقات - مع إشعارات
+// ============================================================
+app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
     try {
-        const userId = req.params.userId;
-        const userSongs = getUserSongs(userId);
-        res.json({ total: userSongs.length, data: userSongs });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed' });
-    }
-});
+        const sharedId = req.params.sharedId;
+        const shared = findSharedSongById(sharedId);
+        if (!shared) return res.status(404).json({ error: 'Shared song not found' });
 
-app.post('/api/songs', authMiddleware, (req, res) => {
-    try {
-        const { title, style, audioUrl, downloadUrl, imageUrl, prompt, duration, taskId, audioId } = req.body;
-        if (!title || !audioUrl) return res.status(400).json({ error: 'Title and audio URL are required' });
-        const song = {
-            id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+        if (db.likes.find(l => l.sharedSongId === sharedId && l.userId === req.user.id)) {
+            return res.status(400).json({ error: 'Already liked' });
+        }
+
+        const like = {
+            id: 'like-' + Date.now(),
+            sharedSongId: sharedId,
             userId: req.user.id,
-            taskId: taskId || 'task-' + Date.now(),
-            audioId: audioId || 'audio-' + Date.now(),
-            title,
-            style: style || '',
-            audioUrl,
-            downloadUrl: downloadUrl || audioUrl,
-            imageUrl: imageUrl || null,
-            prompt: prompt || '',
-            duration: duration || null,
-            videoUrl: null,
-            status: 'success',
-            isShared: false,
-            likes: 0,
-            commentsCount: 0,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            lyrics: null,
-            instrumentalUrl: null,
-            vocalsUrl: null,
-            wavUrl: null,
-            midiUrl: null
+            username: req.user.username,
+            createdAt: new Date().toISOString()
         };
-        db.songs.push(song);
-        req.user.totalSongs = (req.user.totalSongs || 0) + 1;
+        db.likes.push(like);
+        shared.likes = (shared.likes || 0) + 1;
         db.save();
-        db.addAuditLog('song_created', req.user.id, { title: song.title });
-        res.status(201).json({ success: true, song });
-    } catch (error) {
-        console.error('Error creating song:', error);
-        res.status(500).json({ error: 'Failed to create song' });
-    }
-});
 
-app.delete('/api/songs/:songId', authMiddleware, (req, res) => {
-    try {
-        const songId = req.params.songId;
-        const index = db.songs.findIndex(s => s.id === songId && s.userId === req.user.id);
-        if (index === -1) return res.status(404).json({ error: 'Song not found' });
-        const deleted = db.songs.splice(index, 1)[0];
-        req.user.totalSongs = (req.user.totalSongs || 1) - 1;
-        db.save();
-        db.sharedSongs = db.sharedSongs.filter(s => s.songId !== songId);
-        db.comments = db.comments.filter(c => c.songId !== songId);
-        db.likes = db.likes.filter(l => l.songId !== songId);
-        db.save();
-        db.addAuditLog('song_deleted', req.user.id, { title: deleted.title });
-        res.json({ success: true, message: 'Song deleted' });
-    } catch (error) {
-        console.error('Error deleting song:', error);
-        res.status(500).json({ error: 'Failed to delete song' });
-    }
-});
-
-app.put('/api/songs/:songId', authMiddleware, (req, res) => {
-    try {
-        const songId = req.params.songId;
-        const song = findSongById(songId);
-        if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { title, style, prompt, isShared, audioUrl, downloadUrl, imageUrl, duration, status, videoUrl, lyrics, instrumentalUrl, vocalsUrl, wavUrl, midiUrl } = req.body;
-        if (title) song.title = title;
-        if (style) song.style = style;
-        if (prompt) song.prompt = prompt;
-        if (isShared !== undefined) song.isShared = isShared;
-        if (audioUrl) { song.audioUrl = audioUrl; song.downloadUrl = audioUrl; song.status = 'success'; }
-        if (downloadUrl) song.downloadUrl = downloadUrl;
-        if (imageUrl) song.imageUrl = imageUrl;
-        if (duration) song.duration = duration;
-        if (status) song.status = status;
-        if (videoUrl) song.videoUrl = videoUrl;
-        if (lyrics) song.lyrics = lyrics;
-        if (instrumentalUrl) song.instrumentalUrl = instrumentalUrl;
-        if (vocalsUrl) song.vocalsUrl = vocalsUrl;
-        if (wavUrl) song.wavUrl = wavUrl;
-        if (midiUrl) song.midiUrl = midiUrl;
-        song.updatedAt = new Date().toISOString();
-        db.save();
-        db.addAuditLog('song_updated', req.user.id, { title: song.title });
-        res.json({ success: true, song });
-    } catch (error) {
-        console.error('Error updating song:', error);
-        res.status(500).json({ error: 'Failed to update song' });
-    }
-});
-
-app.post('/api/songs/update/:songId', authMiddleware, (req, res) => {
-    try {
-        const songId = req.params.songId;
-        const song = findSongById(songId);
-        if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        const { audioUrl, downloadUrl, imageUrl, duration, status, videoUrl, lyrics, instrumentalUrl, vocalsUrl, wavUrl, midiUrl } = req.body;
-        let updated = false;
-        if (audioUrl && audioUrl.startsWith('https://')) {
-            song.audioUrl = audioUrl;
-            song.downloadUrl = audioUrl;
-            song.status = 'success';
-            updated = true;
+        if (shared.userId !== req.user.id) {
+            db.addNotification(shared.userId, 'like', `${req.user.username} أعجب بأغنيتك "${shared.title}"`, {
+                sharedSongId: sharedId,
+                songTitle: shared.title,
+                likerId: req.user.id,
+                likerUsername: req.user.username
+            });
         }
-        if (downloadUrl) song.downloadUrl = downloadUrl;
-        if (imageUrl) song.imageUrl = imageUrl;
-        if (duration) song.duration = duration;
-        if (status) song.status = status;
-        if (videoUrl) { song.videoUrl = videoUrl; updated = true; }
-        if (lyrics) { song.lyrics = lyrics; updated = true; }
-        if (instrumentalUrl) { song.instrumentalUrl = instrumentalUrl; updated = true; }
-        if (vocalsUrl) { song.vocalsUrl = vocalsUrl; updated = true; }
-        if (wavUrl) { song.wavUrl = wavUrl; updated = true; }
-        if (midiUrl) { song.midiUrl = midiUrl; updated = true; }
-        if (updated) {
-            song.updatedAt = new Date().toISOString();
-            db.save();
-            db.addAuditLog('song_updated_manually', req.user.id, { title: song.title });
-            res.json({ success: true, message: 'Song updated', song });
-        } else {
-            res.json({ success: false, message: 'No valid data provided' });
-        }
+
+        db.addAuditLog('song_liked', req.user.id, { sharedId });
+        res.json({ success: true, likes: shared.likes });
     } catch (error) {
-        console.error('Error updating song manually:', error);
-        res.status(500).json({ error: 'Failed to update song' });
+        console.error('Error liking song:', error);
+        res.status(500).json({ error: 'Failed to like song' });
     }
 });
 
+app.delete('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
+    try {
+        const sharedId = req.params.sharedId;
+        const shared = findSharedSongById(sharedId);
+        if (!shared) return res.status(404).json({ error: 'Shared song not found' });
+
+        const index = db.likes.findIndex(l => l.sharedSongId === sharedId && l.userId === req.user.id);
+        if (index === -1) return res.status(400).json({ error: 'Not liked' });
+
+        db.likes.splice(index, 1);
+        shared.likes = (shared.likes || 1) - 1;
+        db.save();
+
+        db.addAuditLog('song_unliked', req.user.id, { sharedId });
+        res.json({ success: true, likes: shared.likes });
+    } catch (error) {
+        console.error('Error unliking song:', error);
+        res.status(500).json({ error: 'Failed to unlike song' });
+    }
+});
+
+app.post('/api/shared-songs/:sharedId/comments', authMiddleware, (req, res) => {
+    try {
+        const sharedId = req.params.sharedId;
+        const { text } = req.body;
+        if (!text || text.trim().length === 0) return res.status(400).json({ error: 'Comment text is required' });
+
+        const shared = findSharedSongById(sharedId);
+        if (!shared) return res.status(404).json({ error: 'Shared song not found' });
+
+        const comment = {
+            id: 'comment-' + Date.now(),
+            sharedSongId: sharedId,
+            userId: req.user.id,
+            username: req.user.username,
+            text: text.trim(),
+            createdAt: new Date().toISOString()
+        };
+        db.comments.push(comment);
+        shared.commentsCount = (shared.commentsCount || 0) + 1;
+        db.save();
+
+        if (shared.userId !== req.user.id) {
+            db.addNotification(shared.userId, 'comment', `${req.user.username} علق على أغنيتك "${shared.title}"`, {
+                sharedSongId: sharedId,
+                songTitle: shared.title,
+                commenterId: req.user.id,
+                commenterUsername: req.user.username,
+                commentId: comment.id,
+                commentText: text.trim()
+            });
+        }
+
+        db.addAuditLog('comment_added', req.user.id, { sharedId });
+        res.json({ success: true, comment, commentsCount: shared.commentsCount });
+    } catch (error) {
+        console.error('Error adding comment:', error);
+        res.status(500).json({ error: 'Failed to add comment' });
+    }
+});
+
+// ============================================================
+// مشاركة الأغنية - مع إشعار
+// ============================================================
 app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
     try {
         const songId = req.params.songId;
         const song = findSongById(songId);
         if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
+
         if (db.sharedSongs.find(s => s.songId === songId)) {
             return res.status(400).json({ error: 'Already shared' });
         }
+
         const shared = {
             id: 'shared-' + Date.now(),
             songId: song.id,
@@ -421,150 +765,22 @@ app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
         db.sharedSongs.push(shared);
         song.isShared = true;
         db.save();
+
+        const followers = db.follows.filter(f => f.followingId === req.user.id);
+        followers.forEach(f => {
+            db.addNotification(f.followerId, 'share', `${req.user.username} شارك أغنية جديدة "${song.title}"`, {
+                sharedSongId: shared.id,
+                songTitle: song.title,
+                sharerId: req.user.id,
+                sharerUsername: req.user.username
+            });
+        });
+
         db.addAuditLog('song_shared', req.user.id, { title: song.title });
         res.json({ success: true, shared });
     } catch (error) {
         console.error('Error sharing song:', error);
         res.status(500).json({ error: 'Failed to share song' });
-    }
-});
-
-app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
-    try {
-        const songId = req.params.songId;
-        const song = findSongById(songId);
-        if (!song || song.userId !== req.user.id) return res.status(404).json({ error: 'Song not found' });
-        db.sharedSongs = db.sharedSongs.filter(s => s.songId !== songId);
-        song.isShared = false;
-        db.save();
-        db.addAuditLog('song_unshared', req.user.id, { songId });
-        res.json({ success: true, message: 'Unshared' });
-    } catch (error) {
-        console.error('Error unsharing song:', error);
-        res.status(500).json({ error: 'Failed to unshare song' });
-    }
-});
-
-// ============================================================
-// الأغاني المشتركة (عامة)
-// ============================================================
-app.get('/api/shared-songs', (req, res) => {
-    try {
-        const limit = parseInt(req.query.limit) || 50;
-        const shared = db.sharedSongs
-            .sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt))
-            .slice(0, limit);
-        const result = shared.map(s => {
-            const likes = db.likes.filter(l => l.sharedSongId === s.id).length;
-            const comments = db.comments.filter(c => c.sharedSongId === s.id).length;
-            return { ...s, likes, commentsCount: comments, userLiked: false };
-        });
-        res.json({ total: db.sharedSongs.length, data: result });
-    } catch (error) {
-        console.error('Error fetching shared songs:', error);
-        res.status(500).json({ error: 'Failed to fetch shared songs' });
-    }
-});
-
-app.get('/api/users/:userId/songs', (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const user = findUserById(userId);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        const userSongs = db.songs.filter(s => s.userId === userId && s.isShared === true);
-        res.json({ username: user.username, total: userSongs.length, data: userSongs });
-    } catch (error) {
-        console.error('Error fetching user songs:', error);
-        res.status(500).json({ error: 'Failed to fetch user songs' });
-    }
-});
-
-// ============================================================
-// الإعجابات والتعليقات
-// ============================================================
-app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
-    try {
-        const sharedId = req.params.sharedId;
-        const shared = findSharedSongById(sharedId);
-        if (!shared) return res.status(404).json({ error: 'Shared song not found' });
-        if (db.likes.find(l => l.sharedSongId === sharedId && l.userId === req.user.id)) {
-            return res.status(400).json({ error: 'Already liked' });
-        }
-        const like = { id: 'like-' + Date.now(), sharedSongId: sharedId, userId: req.user.id, username: req.user.username, createdAt: new Date().toISOString() };
-        db.likes.push(like);
-        shared.likes = (shared.likes || 0) + 1;
-        db.save();
-        db.addAuditLog('song_liked', req.user.id, { sharedId });
-        res.json({ success: true, likes: shared.likes });
-    } catch (error) {
-        console.error('Error liking song:', error);
-        res.status(500).json({ error: 'Failed to like song' });
-    }
-});
-
-app.delete('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
-    try {
-        const sharedId = req.params.sharedId;
-        const shared = findSharedSongById(sharedId);
-        if (!shared) return res.status(404).json({ error: 'Shared song not found' });
-        const index = db.likes.findIndex(l => l.sharedSongId === sharedId && l.userId === req.user.id);
-        if (index === -1) return res.status(400).json({ error: 'Not liked' });
-        db.likes.splice(index, 1);
-        shared.likes = (shared.likes || 1) - 1;
-        db.save();
-        db.addAuditLog('song_unliked', req.user.id, { sharedId });
-        res.json({ success: true, likes: shared.likes });
-    } catch (error) {
-        console.error('Error unliking song:', error);
-        res.status(500).json({ error: 'Failed to unlike song' });
-    }
-});
-
-app.post('/api/shared-songs/:sharedId/comments', authMiddleware, (req, res) => {
-    try {
-        const sharedId = req.params.sharedId;
-        const { text } = req.body;
-        if (!text || text.trim().length === 0) return res.status(400).json({ error: 'Comment text is required' });
-        const shared = findSharedSongById(sharedId);
-        if (!shared) return res.status(404).json({ error: 'Shared song not found' });
-        const comment = { id: 'comment-' + Date.now(), sharedSongId: sharedId, userId: req.user.id, username: req.user.username, text: text.trim(), createdAt: new Date().toISOString() };
-        db.comments.push(comment);
-        shared.commentsCount = (shared.commentsCount || 0) + 1;
-        db.save();
-        db.addAuditLog('comment_added', req.user.id, { sharedId });
-        res.json({ success: true, comment, commentsCount: shared.commentsCount });
-    } catch (error) {
-        console.error('Error adding comment:', error);
-        res.status(500).json({ error: 'Failed to add comment' });
-    }
-});
-
-app.get('/api/shared-songs/:sharedId/comments', (req, res) => {
-    try {
-        const sharedId = req.params.sharedId;
-        const comments = db.comments.filter(c => c.sharedSongId === sharedId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        res.json({ total: comments.length, data: comments });
-    } catch (error) {
-        console.error('Error fetching comments:', error);
-        res.status(500).json({ error: 'Failed to fetch comments' });
-    }
-});
-
-app.delete('/api/comments/:commentId', authMiddleware, (req, res) => {
-    try {
-        const commentId = req.params.commentId;
-        const index = db.comments.findIndex(c => c.id === commentId && c.userId === req.user.id);
-        if (index === -1) return res.status(404).json({ error: 'Comment not found' });
-        const comment = db.comments[index];
-        const shared = findSharedSongById(comment.sharedSongId);
-        if (shared) shared.commentsCount = (shared.commentsCount || 1) - 1;
-        db.comments.splice(index, 1);
-        db.save();
-        db.addAuditLog('comment_deleted', req.user.id, { commentId });
-        res.json({ success: true, message: 'Comment deleted' });
-    } catch (error) {
-        console.error('Error deleting comment:', error);
-        res.status(500).json({ error: 'Failed to delete comment' });
     }
 });
 
@@ -601,7 +817,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// ⭐ Webhook المحسّن (يدعم جميع أنواع الردود)
+// ⭐ Webhook المحسّن (يحدّث كل الطلبات إلى success)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
@@ -637,17 +853,17 @@ app.post('/webhook', (req, res) => {
             taskId = body.data.task_id || body.task_id || null;
             console.log(`🎵 [WEBHOOK] حالة WAV: ${wavUrl}`);
             
-            // البحث عن السجل المعلق باستخدام tempTaskId
             let found = false;
             if (tempTaskId) {
                 const pendingSong = db.songs.find(s => s.taskId === tempTaskId && s.userId === userId);
                 if (pendingSong) {
                     pendingSong.wavUrl = wavUrl;
                     pendingSong.status = 'success';
+                    pendingSong.title = 'تحويل WAV';
                     pendingSong.updatedAt = new Date().toISOString();
                     if (taskId) pendingSong.taskId = taskId;
                     db.save();
-                    console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية: ${pendingSong.title} (tempTaskId: ${tempTaskId})`);
+                    console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية (حالة success): ${pendingSong.title}`);
                     found = true;
                 }
             }
@@ -657,9 +873,10 @@ app.post('/webhook', (req, res) => {
                 if (existing) {
                     existing.wavUrl = wavUrl;
                     existing.status = 'success';
+                    existing.title = 'تحويل WAV';
                     existing.updatedAt = new Date().toISOString();
                     db.save();
-                    console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية: ${existing.title} (taskId: ${taskId})`);
+                    console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية (حالة success): ${existing.title}`);
                     found = true;
                 }
             }
@@ -715,10 +932,11 @@ app.post('/webhook', (req, res) => {
                 if (pendingSong) {
                     pendingSong.videoUrl = videoUrl;
                     pendingSong.status = 'success';
+                    pendingSong.title = 'فيديو موسيقي';
                     pendingSong.updatedAt = new Date().toISOString();
                     if (taskId) pendingSong.taskId = taskId;
                     db.save();
-                    console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية: ${pendingSong.title} (tempTaskId: ${tempTaskId})`);
+                    console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية (حالة success): ${pendingSong.title}`);
                     found = true;
                 }
             }
@@ -728,9 +946,10 @@ app.post('/webhook', (req, res) => {
                 if (existing) {
                     existing.videoUrl = videoUrl;
                     existing.status = 'success';
+                    existing.title = 'فيديو موسيقي';
                     existing.updatedAt = new Date().toISOString();
                     db.save();
-                    console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية: ${existing.title} (taskId: ${taskId})`);
+                    console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية (حالة success): ${existing.title}`);
                     found = true;
                 }
             }
@@ -776,10 +995,29 @@ app.post('/webhook', (req, res) => {
         // ⭐ الحالة 4: فصل الصوت (vocal-removal)
         // ============================================================
         else if (body?.data?.vocal_removal_info || body?.data?.instrumental_url || body?.data?.vocal_url) {
-            // قد يكون الهيكل مختلفاً حسب الرد
-            const audioUrl = body.data.audio_url || null;
-            const instrumental = body.data.instrumental_url || null;
-            const vocal = body.data.vocal_url || null;
+            let instrumental = null;
+            let vocal = null;
+            
+            if (body.data.vocal_removal_info) {
+                const info = body.data.vocal_removal_info;
+                instrumental = info.instrumental_url || null;
+                vocal = info.vocal_url || null;
+                if (!instrumental || !vocal) {
+                    if (info.origin_data && Array.isArray(info.origin_data)) {
+                        info.origin_data.forEach(item => {
+                            if (item.stem_type_group_name === 'Instrumental') {
+                                instrumental = item.audio_url || null;
+                            } else if (item.stem_type_group_name === 'Vocals') {
+                                vocal = item.audio_url || null;
+                            }
+                        });
+                    }
+                }
+            }
+            
+            if (!instrumental) instrumental = body.data.instrumental_url || null;
+            if (!vocal) vocal = body.data.vocal_url || null;
+            
             taskId = body.data.task_id || body.task_id || null;
             
             console.log(`🎤 [WEBHOOK] حالة فصل الصوت: instrumental=${instrumental}, vocal=${vocal}`);
@@ -790,12 +1028,12 @@ app.post('/webhook', (req, res) => {
                 if (pendingSong) {
                     if (instrumental) pendingSong.instrumentalUrl = instrumental;
                     if (vocal) pendingSong.vocalsUrl = vocal;
-                    if (audioUrl) pendingSong.audioUrl = audioUrl;
                     pendingSong.status = 'success';
+                    pendingSong.title = 'فصل الصوت';
                     pendingSong.updatedAt = new Date().toISOString();
                     if (taskId) pendingSong.taskId = taskId;
                     db.save();
-                    console.log(`✅ [WEBHOOK] تم تحديث فصل الصوت للأغنية: ${pendingSong.title} (tempTaskId: ${tempTaskId})`);
+                    console.log(`✅ [WEBHOOK] تم تحديث فصل الصوت للأغنية (حالة success): ${pendingSong.title}`);
                     found = true;
                 }
             }
@@ -805,11 +1043,11 @@ app.post('/webhook', (req, res) => {
                 if (existing) {
                     if (instrumental) existing.instrumentalUrl = instrumental;
                     if (vocal) existing.vocalsUrl = vocal;
-                    if (audioUrl) existing.audioUrl = audioUrl;
                     existing.status = 'success';
+                    existing.title = 'فصل الصوت';
                     existing.updatedAt = new Date().toISOString();
                     db.save();
-                    console.log(`✅ [WEBHOOK] تم تحديث فصل الصوت للأغنية: ${existing.title} (taskId: ${taskId})`);
+                    console.log(`✅ [WEBHOOK] تم تحديث فصل الصوت للأغنية (حالة success): ${existing.title}`);
                     found = true;
                 }
             }
@@ -820,8 +1058,8 @@ app.post('/webhook', (req, res) => {
                     userId: userId,
                     taskId: taskId || 'vocal-removal-' + Date.now(),
                     audioId: 'vocal-removal-' + Date.now(),
-                    audioUrl: audioUrl || null,
-                    downloadUrl: audioUrl || null,
+                    audioUrl: null,
+                    downloadUrl: null,
                     imageUrl: null,
                     title: 'فصل الصوت',
                     style: '',
@@ -855,7 +1093,6 @@ app.post('/webhook', (req, res) => {
         // ⭐ الحالة 5: بيانات أخرى (محاولة البحث العام)
         // ============================================================
         else {
-            // البحث عن أي رابط في البيانات
             if (body?.data) {
                 const dataObj = body.data;
                 for (const key in dataObj) {
@@ -885,10 +1122,11 @@ app.post('/webhook', (req, res) => {
                         if (instrumentalUrl) pendingSong.instrumentalUrl = instrumentalUrl;
                         if (vocalsUrl) pendingSong.vocalsUrl = vocalsUrl;
                         pendingSong.status = 'success';
+                        pendingSong.title = 'عملية مكتملة';
                         pendingSong.updatedAt = new Date().toISOString();
                         if (taskId) pendingSong.taskId = taskId;
                         db.save();
-                        console.log(`✅ [WEBHOOK] تم تحديث السجل المعلق (tempTaskId: ${tempTaskId})`);
+                        console.log(`✅ [WEBHOOK] تم تحديث السجل المعلق (حالة success) (tempTaskId: ${tempTaskId})`);
                         found = true;
                     }
                 }
@@ -900,9 +1138,10 @@ app.post('/webhook', (req, res) => {
                         if (instrumentalUrl) existing.instrumentalUrl = instrumentalUrl;
                         if (vocalsUrl) existing.vocalsUrl = vocalsUrl;
                         existing.status = 'success';
+                        existing.title = 'عملية مكتملة';
                         existing.updatedAt = new Date().toISOString();
                         db.save();
-                        console.log(`✅ [WEBHOOK] تم تحديث السجل المعلق (taskId: ${taskId})`);
+                        console.log(`✅ [WEBHOOK] تم تحديث السجل المعلق (حالة success) (taskId: ${taskId})`);
                         found = true;
                     }
                 }
@@ -915,7 +1154,7 @@ app.post('/webhook', (req, res) => {
                         audioUrl: null,
                         downloadUrl: null,
                         imageUrl: null,
-                        title: 'عملية غير معروفة',
+                        title: 'عملية مكتملة',
                         style: '',
                         prompt: '',
                         duration: null,
@@ -981,7 +1220,6 @@ app.post('/webhook', (req, res) => {
             console.log(`   - الفيديو: ${videoUrl ? '✅' : '❌'}`);
             console.log(`   - الصورة: ${imageUrl ? '✅' : '❌'}`);
 
-            // البحث عن السجل المعلق
             let existingSong = null;
             if (tempTaskId) {
                 existingSong = db.songs.find(s => s.taskId === tempTaskId && s.userId === userId);
@@ -995,9 +1233,6 @@ app.post('/webhook', (req, res) => {
 
             if (existingSong) {
                 let updated = false;
-                const wasPending = existingSong.status === 'pending' || existingSong.title.includes('جاري المعالجة');
-
-                // ⭐ تحديث العنوان إذا كان مؤقتاً
                 if (title && (existingSong.title.includes('جاري المعالجة') || existingSong.title === 'بدون عنوان')) {
                     existingSong.title = title;
                     updated = true;
@@ -1056,21 +1291,22 @@ app.post('/webhook', (req, res) => {
                     updated = true;
                 }
 
-                // ⭐ تحديث taskId إذا كان مؤقتاً
                 if (clipTaskId && existingSong.taskId && existingSong.taskId.startsWith('temp-')) {
                     existingSong.taskId = clipTaskId;
                     updated = true;
                     console.log(`🔄 [WEBHOOK] تم تحديث taskId إلى: ${clipTaskId}`);
                 }
 
-                // ⭐ تحديث audioId إذا كان pending
                 if (audioId && existingSong.audioId && existingSong.audioId.startsWith('pending-')) {
                     existingSong.audioId = audioId;
                     updated = true;
                 }
 
-                // ⭐ تحديث الحالة إلى success
-                if (audioUrl || videoUrl) {
+                if (existingSong.status === 'pending' || existingSong.title.includes('جاري المعالجة')) {
+                    existingSong.status = 'success';
+                    updated = true;
+                }
+                if (audioUrl || videoUrl || wavUrl || instrumentalUrl || vocalsUrl || midiUrl) {
                     existingSong.status = 'success';
                     updated = true;
                 }
@@ -1081,7 +1317,6 @@ app.post('/webhook', (req, res) => {
                     console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}" (الحالة: ${existingSong.status})`);
                 }
             } else {
-                // إنشاء سجل جديد
                 const song = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                     userId: userId,
@@ -1143,7 +1378,6 @@ app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
 
         const { apiKey: _, ...payload } = req.body;
 
-        // إنشاء معرف مؤقت لربط السجل المعلق
         const tempTaskId = `temp-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 
         if (endpointsWithCallback.includes(endpoint)) {
@@ -1175,12 +1409,10 @@ app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
 
         console.log(`📊 Proxy response status: ${response.status}`);
 
-        // إذا كانت الاستجابة ناجحة، نحاول حفظ النتيجة فوراً أو إنشاء سجل معلق
         if (response.ok) {
             let clips = [];
             let taskId = data.task_id || data.data?.task_id || null;
 
-            // محاولة استخراج المقاطع
             if (data?.data?.data && Array.isArray(data.data.data)) {
                 clips = data.data.data;
                 taskId = data.data.task_id || data.task_id || taskId;
@@ -1236,7 +1468,6 @@ app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
                         savedCount++;
                         console.log(`✅ Proxy: تم حفظ الأغنية (فيديو: ${videoUrl ? '✅' : '❌'})`);
                     } else if (existing) {
-                        // تحديث الأغنية الموجودة إذا كان هناك فيديو جديد
                         const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
                         if (existingSong && videoUrl && !existingSong.videoUrl) {
                             existingSong.videoUrl = videoUrl;
@@ -1249,7 +1480,6 @@ app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
                 if (savedCount > 0) db.save();
                 data._saved = savedCount;
             } else {
-                // إنشاء سجل معلق باستخدام tempTaskId
                 const audioId = `pending-${Date.now()}`;
                 const existing = db.songs.some(s => s.taskId === tempTaskId);
                 if (!existing) {
@@ -1344,7 +1574,9 @@ app.get('/healthz', (req, res) => {
         songsCount: db.songs.length,
         sharedCount: db.sharedSongs.length,
         commentsCount: db.comments.length,
-        likesCount: db.likes.length
+        likesCount: db.likes.length,
+        followsCount: db.follows.length,
+        notificationsCount: db.notifications.length
     });
 });
 
@@ -1357,10 +1589,20 @@ app.listen(PORT, () => {
     console.log(`   🔐 POST /api/auth/login`);
     console.log(`   ✨ POST /api/auth/register`);
     console.log(`   👤 GET  /api/users/me`);
+    console.log(`   👤 GET  /api/users/:userId`);
+    console.log(`   📝 PUT  /api/users/profile`);
+    console.log(`   👥 POST /api/users/:userId/follow`);
+    console.log(`   👥 DELETE /api/users/:userId/follow`);
+    console.log(`   👥 GET  /api/users/:userId/followers`);
+    console.log(`   👥 GET  /api/users/:userId/following`);
+    console.log(`   🔔 GET  /api/notifications`);
+    console.log(`   🔔 PUT  /api/notifications/:id/read`);
+    console.log(`   🔔 PUT  /api/notifications/read-all`);
     console.log(`   🎵 GET  /api/songs (auth required)`);
     console.log(`   📨 POST /webhook (Suno callback)`);
     console.log(`   🔄 POST /api/proxy/suno/* (proxy to Suno API)`);
     console.log(`   🔄 GET  /api/proxy/suno/* (proxy GET to Suno API)`);
     console.log(`   🏠 GET  /healthz`);
-    console.log(`👑 Admin: admin@example.com / admin123`);
+    console.log(`👑 Admins: admin@example.com / admin123`);
+    console.log(`👑 Admins: info@msproductions.com / Msm12345`);
 });

@@ -3,7 +3,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -20,16 +19,10 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 
 // ============================================================
-// إعدادات multer لاستقبال الملفات (للنسخ الاحتياطي)
-// ============================================================
-const upload = multer({ dest: 'uploads/' });
-
-// ============================================================
 // إعدادات
 // ============================================================
 const CONFIG = {
     DATA_FILE: path.join(__dirname, 'data.json'),
-    BACKUP_FILE: path.join(__dirname, 'data_backup.json'),
     MAX_SONGS_PER_USER: 1000
 };
 
@@ -41,46 +34,31 @@ class Database {
         this.data = { users: [], songs: [], sharedSongs: [], comments: [], likes: [], auditLogs: [] };
         this.load();
     }
-
     load() {
         try {
             if (fs.existsSync(CONFIG.DATA_FILE)) {
-                const raw = fs.readFileSync(CONFIG.DATA_FILE, 'utf8');
-                this.data = JSON.parse(raw);
-                console.log(`📂 تم تحميل البيانات من الملف (${this.data.users.length} مستخدم، ${this.data.songs.length} أغنية)`);
-            } else {
-                console.log('📂 لا يوجد ملف بيانات سابق، سيتم إنشاء ملف جديد.');
-                this.save();
+                this.data = JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, 'utf8'));
+                console.log('📂 تم تحميل البيانات');
             }
-        } catch (e) {
-            console.error('⚠️ خطأ في تحميل البيانات:', e.message);
-            this.data = { users: [], songs: [], sharedSongs: [], comments: [], likes: [], auditLogs: [] };
-            this.save();
-        }
+        } catch (e) { console.error('⚠️ خطأ في تحميل البيانات:', e.message); }
     }
-
     save() {
         try {
             fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(this.data, null, 2));
-        } catch (e) {
-            console.error('❌ خطأ في حفظ البيانات:', e.message);
-        }
+        } catch (e) { console.error('❌ خطأ في حفظ البيانات:', e.message); }
     }
-
-    // دوال getters/setters
     get users() { return this.data.users; }
-    set users(val) { this.data.users = val; this.save(); }
+    set users(v) { this.data.users = v; this.save(); }
     get songs() { return this.data.songs; }
-    set songs(val) { this.data.songs = val; this.save(); }
+    set songs(v) { this.data.songs = v; this.save(); }
     get sharedSongs() { return this.data.sharedSongs; }
-    set sharedSongs(val) { this.data.sharedSongs = val; this.save(); }
+    set sharedSongs(v) { this.data.sharedSongs = v; this.save(); }
     get comments() { return this.data.comments; }
-    set comments(val) { this.data.comments = val; this.save(); }
+    set comments(v) { this.data.comments = v; this.save(); }
     get likes() { return this.data.likes; }
-    set likes(val) { this.data.likes = val; this.save(); }
+    set likes(v) { this.data.likes = v; this.save(); }
     get auditLogs() { return this.data.auditLogs; }
-    set auditLogs(val) { this.data.auditLogs = val; this.save(); }
-
+    set auditLogs(v) { this.data.auditLogs = v; this.save(); }
     addAuditLog(action, userId, details) {
         this.auditLogs.push({
             id: crypto.randomBytes(8).toString('hex'),
@@ -89,9 +67,7 @@ class Database {
             details,
             timestamp: new Date().toISOString()
         });
-        if (this.auditLogs.length > 1000) {
-            this.auditLogs = this.auditLogs.slice(-1000);
-        }
+        if (this.auditLogs.length > 1000) this.auditLogs = this.auditLogs.slice(-1000);
         this.save();
     }
 }
@@ -142,111 +118,10 @@ if (!db.users.find(u => u.username === 'admin')) {
     db.users.push(admin);
     db.save();
     console.log('👑 Admin created: admin@example.com / admin123');
-} else {
-    console.log('✅ Admin already exists.');
 }
 
 // ============================================================
-// نقاط نهاية النسخ الاحتياطي (Backup & Restore)
-// ============================================================
-
-// 1. تحميل النسخة الاحتياطية (تنزيل data.json)
-app.get('/api/backup/download', authMiddleware, (req, res) => {
-    try {
-        // فقط Admin يمكنه تحميل النسخة الاحتياطية
-        if (req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin only' });
-        }
-        
-        // حفظ نسخة احتياطية مؤقتة
-        const backupPath = CONFIG.BACKUP_FILE;
-        fs.writeFileSync(backupPath, JSON.stringify(db.data, null, 2));
-        
-        res.download(backupPath, 'data_backup.json', (err) => {
-            if (err) {
-                console.error('Download error:', err);
-            }
-            // حذف الملف المؤقت بعد التحميل
-            fs.unlink(backupPath, () => {});
-        });
-    } catch (error) {
-        console.error('Backup download error:', error);
-        res.status(500).json({ error: 'Failed to download backup' });
-    }
-});
-
-// 2. استعادة النسخة الاحتياطية (رفع ملف data.json)
-app.post('/api/backup/restore', authMiddleware, upload.single('backupFile'), (req, res) => {
-    try {
-        // فقط Admin يمكنه استعادة النسخة الاحتياطية
-        if (req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin only' });
-        }
-        
-        if (!req.file) {
-            return res.status(400).json({ error: 'No file uploaded' });
-        }
-        
-        // قراءة الملف المرفوع
-        const fileContent = fs.readFileSync(req.file.path, 'utf8');
-        const backupData = JSON.parse(fileContent);
-        
-        // التحقق من صحة البيانات
-        if (!backupData.users || !backupData.songs) {
-            return res.status(400).json({ error: 'Invalid backup file format' });
-        }
-        
-        // استعادة البيانات
-        db.data = backupData;
-        db.save();
-        
-        // حذف الملف المؤقت
-        fs.unlink(req.file.path, () => {});
-        
-        db.addAuditLog('backup_restored', req.user.id, { 
-            users: backupData.users.length, 
-            songs: backupData.songs.length 
-        });
-        
-        res.json({ 
-            success: true, 
-            message: 'Backup restored successfully',
-            users: backupData.users.length,
-            songs: backupData.songs.length
-        });
-    } catch (error) {
-        console.error('Restore error:', error);
-        res.status(500).json({ error: 'Failed to restore backup' });
-    }
-});
-
-// 3. معلومات عن البيانات الحالية
-app.get('/api/backup/info', authMiddleware, (req, res) => {
-    try {
-        if (req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Admin only' });
-        }
-        
-        const stats = {
-            users: db.users.length,
-            songs: db.songs.length,
-            sharedSongs: db.sharedSongs.length,
-            comments: db.comments.length,
-            likes: db.likes.length,
-            auditLogs: db.auditLogs.length,
-            lastBackup: fs.existsSync(CONFIG.BACKUP_FILE) ? 
-                fs.statSync(CONFIG.BACKUP_FILE).mtime : null
-        };
-        
-        res.json(stats);
-    } catch (error) {
-        console.error('Info error:', error);
-        res.status(500).json({ error: 'Failed to get info' });
-    }
-});
-
-// ============================================================
-// نقاط نهاية المصادقة (كما هي)
+// نقاط نهاية المصادقة
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
@@ -698,10 +573,11 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook الرئيسي
+// Webhook الرئيسي (مع تحديث الأغاني المعلقة)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
+    console.log('📦 [WEBHOOK] Headers:', JSON.stringify(req.headers, null, 2));
     console.log('📦 [WEBHOOK] Query:', req.query);
     console.log('📦 [WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
 
@@ -720,18 +596,23 @@ app.post('/webhook', (req, res) => {
         if (body?.data?.data && Array.isArray(body.data.data)) {
             clips = body.data.data;
             taskId = body.data.task_id || body.task_id || null;
+            console.log(`📌 [WEBHOOK] استخراج من body.data.data, taskId: ${taskId}`);
         } else if (body?.data && Array.isArray(body.data)) {
             clips = body.data;
             taskId = body.task_id || null;
+            console.log(`📌 [WEBHOOK] استخراج من body.data, taskId: ${taskId}`);
         } else if (body?.clips && Array.isArray(body.clips)) {
             clips = body.clips;
             taskId = body.task_id || null;
+            console.log(`📌 [WEBHOOK] استخراج من body.clips, taskId: ${taskId}`);
         } else if (Array.isArray(body)) {
             clips = body;
+            console.log(`📌 [WEBHOOK] استخراج من الجسم الرئيسي (مصفوفة)`);
         } else {
             for (const key in body) {
                 if (Array.isArray(body[key])) {
                     clips = body[key];
+                    console.log(`📌 [WEBHOOK] استخراج من body.${key} (مصفوفة)`);
                     break;
                 }
             }
@@ -891,7 +772,7 @@ app.post('/webhook-test', (req, res) => {
 });
 
 // ============================================================
-// Proxy لـ Suno API
+// Proxy لـ Suno API (مع تحسين حفظ الفيديو)
 // ============================================================
 app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     try {
@@ -901,6 +782,7 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: 'API Key required' });
         }
 
+        // إزالة apiKey من الجسم قبل الإرسال
         const { apiKey: _, ...payload } = req.body;
         payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
 
@@ -924,6 +806,7 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         console.log(`📊 Proxy response status: ${response.status}`);
         console.log('📊 Proxy response data:', JSON.stringify(data, null, 2));
 
+        // حفظ النتيجة في قاعدة البيانات
         if (response.ok) {
             let clips = [];
             let taskId = data.task_id || data.data?.task_id || null;
@@ -983,6 +866,7 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
                             savedCount++;
                             console.log(`✅ Proxy: تم حفظ الأغنية: ${song.title} - فيديو: ${videoUrl ? '✅' : '❌'}`);
                         } else {
+                            // تحديث الأغنية الموجودة إذا كان هناك فيديو جديد
                             const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
                             if (existingSong && videoUrl && !existingSong.videoUrl) {
                                 existingSong.videoUrl = videoUrl;
@@ -1065,9 +949,6 @@ app.listen(PORT, () => {
     console.log(`   🧪 POST /webhook-test?userId=xxx (test webhook)`);
     console.log(`   🔄 POST /api/proxy/suno/:endpoint (proxy to Suno API)`);
     console.log(`   🔄 GET  /api/proxy/suno/:endpoint (proxy GET to Suno API)`);
-    console.log(`   💾 GET  /api/backup/download (download backup - admin only)`);
-    console.log(`   💾 POST /api/backup/restore (restore backup - admin only)`);
-    console.log(`   💾 GET  /api/backup/info (backup info - admin only)`);
     console.log(`   🏠 GET  /healthz`);
     console.log(`👑 Admin: admin@example.com / admin123`);
 });

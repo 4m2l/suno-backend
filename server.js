@@ -8,6 +8,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
+// ⭐ تعريف INTERNAL_WEBHOOK (المفقود سابقاً)
+// ============================================================
+const INTERNAL_WEBHOOK = `https://suno-backend-production.up.railway.app/webhook`;
+
+// ============================================================
 // إعدادات CORS
 // ============================================================
 app.use(cors({
@@ -784,11 +789,16 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
 
         // إزالة apiKey من الجسم قبل الإرسال
         const { apiKey: _, ...payload } = req.body;
+        // ⭐ استخدام INTERNAL_WEBHOOK المعرفة
         payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
 
         const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
         console.log(`🔄 Proxy to Suno: ${sunoUrl}`);
         console.log('📦 Payload:', JSON.stringify(payload, null, 2));
+
+        // ⭐ إضافة مهلة 30 ثانية
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
 
         const response = await fetch(sunoUrl, {
             method: 'POST',
@@ -796,8 +806,10 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
                 'Authorization': `Bearer ${apiKey}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: controller.signal
         });
+        clearTimeout(timeout);
 
         let data = null;
         let responseText = await response.text();
@@ -885,7 +897,12 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         res.status(response.status).json(data);
     } catch (error) {
         console.error('Proxy error:', error);
-        res.status(500).json({ error: 'Proxy request failed', details: error.message });
+        // ⭐ إرجاع رسالة خطأ أكثر وضوحاً
+        res.status(500).json({ 
+            error: 'Proxy request failed', 
+            details: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 });
 

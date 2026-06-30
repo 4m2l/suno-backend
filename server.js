@@ -601,7 +601,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// ⭐ Webhook المحسّن (يسجل كل شيء ويحفظ الفيديو)
+// ⭐ Webhook المحسّن (يدعم جميع أنواع الردود)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
@@ -613,40 +613,219 @@ app.post('/webhook', (req, res) => {
         const userId = req.query.userId || null;
         console.log(`👤 [WEBHOOK] userId: ${userId}`);
 
-        // محاولة استخراج المقاطع بطرق متعددة
         let clips = [];
         let taskId = null;
+        let wavUrl = null;
+        let videoUrl = null;
 
+        // ============================================================
+        // ⭐ الحالة 1: توليد الأغنية (data.data مصفوفة)
+        // ============================================================
         if (body?.data?.data && Array.isArray(body.data.data)) {
             clips = body.data.data;
             taskId = body.data.task_id || body.task_id || null;
-        } else if (body?.data && Array.isArray(body.data)) {
-            clips = body.data;
-            taskId = body.task_id || null;
-        } else if (body?.clips && Array.isArray(body.clips)) {
-            clips = body.clips;
-            taskId = body.task_id || null;
-        } else if (Array.isArray(body)) {
-            clips = body;
+            console.log(`📌 [WEBHOOK] حالة توليد الأغنية: ${clips.length} مقطع`);
         }
-
-        // إذا لم نجد clips، نبحث عن أي حقل يحتوي على مصفوفة
-        if (clips.length === 0) {
-            for (const key in body) {
-                if (Array.isArray(body[key]) && body[key].length > 0) {
-                    clips = body[key];
-                    console.log(`🔍 [WEBHOOK] وجدت مصفوفة في المفتاح: ${key}`);
-                    break;
+        // ============================================================
+        // ⭐ الحالة 2: تحويل إلى WAV (audio_wav_url)
+        // ============================================================
+        else if (body?.data?.audio_wav_url) {
+            wavUrl = body.data.audio_wav_url;
+            taskId = body.data.task_id || body.task_id || null;
+            console.log(`🎵 [WEBHOOK] حالة WAV: ${wavUrl}`);
+            
+            // البحث عن الأغنية المعلقة وتحديثها
+            if (taskId && userId) {
+                const pendingSongs = db.songs.filter(s => s.userId === userId && s.status === 'pending' && !s.wavUrl);
+                for (const song of pendingSongs) {
+                    if (song.taskId === taskId || song.taskId.includes(taskId) || taskId.includes(song.taskId)) {
+                        song.wavUrl = wavUrl;
+                        song.status = 'success';
+                        song.updatedAt = new Date().toISOString();
+                        db.save();
+                        console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية: ${song.title}`);
+                        break;
+                    }
                 }
             }
+            
+            // محاولة العثور على الأغنية عبر taskId من الـ Proxy
+            if (taskId) {
+                const existing = db.songs.find(s => s.taskId === taskId || s.taskId.includes(taskId) || taskId.includes(s.taskId));
+                if (existing) {
+                    existing.wavUrl = wavUrl;
+                    existing.status = 'success';
+                    existing.updatedAt = new Date().toISOString();
+                    db.save();
+                    console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية: ${existing.title}`);
+                } else {
+                    // إنشاء سجل جديد إذا لم يكن موجوداً
+                    const newSong = {
+                        id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                        userId: userId,
+                        taskId: taskId,
+                        audioId: 'wav-' + Date.now(),
+                        audioUrl: null,
+                        downloadUrl: null,
+                        imageUrl: null,
+                        title: 'تحويل WAV',
+                        style: '',
+                        prompt: '',
+                        duration: null,
+                        videoUrl: null,
+                        status: 'success',
+                        isShared: false,
+                        likes: 0,
+                        commentsCount: 0,
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                        lyrics: null,
+                        instrumentalUrl: null,
+                        vocalsUrl: null,
+                        wavUrl: wavUrl,
+                        midiUrl: null
+                    };
+                    db.songs.push(newSong);
+                    if (userId) {
+                        const user = findUserById(userId);
+                        if (user) user.totalSongs = (user.totalSongs || 0) + 1;
+                    }
+                    db.save();
+                    console.log(`✅ [WEBHOOK] تم حفظ WAV جديد: ${wavUrl}`);
+                }
+            }
+            
+            return res.status(200).json({ received: true, saved: 1, type: 'wav' });
+        }
+        // ============================================================
+        // ⭐ الحالة 3: إنشاء فيديو (video_url)
+        // ============================================================
+        else if (body?.data?.video_url) {
+            videoUrl = body.data.video_url;
+            taskId = body.data.task_id || body.task_id || null;
+            console.log(`🎬 [WEBHOOK] حالة فيديو: ${videoUrl}`);
+            
+            // البحث عن الأغنية المعلقة وتحديثها
+            if (taskId && userId) {
+                const pendingSongs = db.songs.filter(s => s.userId === userId && s.status === 'pending' && !s.videoUrl);
+                for (const song of pendingSongs) {
+                    if (song.taskId === taskId || song.taskId.includes(taskId) || taskId.includes(song.taskId)) {
+                        song.videoUrl = videoUrl;
+                        song.status = 'success';
+                        song.updatedAt = new Date().toISOString();
+                        db.save();
+                        console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية: ${song.title}`);
+                        break;
+                    }
+                }
+            }
+            
+            // محاولة العثور على الأغنية عبر taskId من الـ Proxy
+            if (taskId) {
+                const existing = db.songs.find(s => s.taskId === taskId || s.taskId.includes(taskId) || taskId.includes(s.taskId));
+                if (existing) {
+                    existing.videoUrl = videoUrl;
+                    existing.status = 'success';
+                    existing.updatedAt = new Date().toISOString();
+                    db.save();
+                    console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية: ${existing.title}`);
+                } else {
+                    // إنشاء سجل جديد إذا لم يكن موجوداً
+                    const newSong = {
+                        id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                        userId: userId,
+                        taskId: taskId,
+                        audioId: 'video-' + Date.now(),
+                        audioUrl: null,
+                        downloadUrl: null,
+                        imageUrl: null,
+                        title: 'فيديو موسيقي',
+                        style: '',
+                        prompt: '',
+                        duration: null,
+                        videoUrl: videoUrl,
+                        status: 'success',
+                        isShared: false,
+                        likes: 0,
+                        commentsCount: 0,
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                        lyrics: null,
+                        instrumentalUrl: null,
+                        vocalsUrl: null,
+                        wavUrl: null,
+                        midiUrl: null
+                    };
+                    db.songs.push(newSong);
+                    if (userId) {
+                        const user = findUserById(userId);
+                        if (user) user.totalSongs = (user.totalSongs || 0) + 1;
+                    }
+                    db.save();
+                    console.log(`✅ [WEBHOOK] تم حفظ فيديو جديد: ${videoUrl}`);
+                }
+            }
+            
+            return res.status(200).json({ received: true, saved: 1, type: 'video' });
+        }
+        // ============================================================
+        // ⭐ الحالة 4: بيانات أخرى (محاولة البحث العام)
+        // ============================================================
+        else {
+            // البحث عن أي رابط في البيانات
+            if (body?.data) {
+                const dataObj = body.data;
+                for (const key in dataObj) {
+                    const value = dataObj[key];
+                    if (typeof value === 'string' && value.startsWith('https://') && (value.includes('.wav') || value.includes('.mp4') || value.includes('.mp3'))) {
+                        console.log(`🔍 [WEBHOOK] وجدت رابط في المفتاح: ${key} -> ${value}`);
+                        if (key.includes('wav') || key === 'audio_wav_url') {
+                            wavUrl = value;
+                        } else if (key.includes('video') || key === 'video_url') {
+                            videoUrl = value;
+                        }
+                    }
+                }
+            }
+            
+            if (wavUrl) {
+                console.log(`✅ [WEBHOOK] تم استخراج WAV: ${wavUrl}`);
+                // تحديث أو حفظ WAV
+                if (taskId) {
+                    const existing = db.songs.find(s => s.taskId === taskId || s.taskId.includes(taskId) || taskId.includes(s.taskId));
+                    if (existing) {
+                        existing.wavUrl = wavUrl;
+                        existing.status = 'success';
+                        existing.updatedAt = new Date().toISOString();
+                        db.save();
+                        console.log(`✅ [WEBHOOK] تم تحديث WAV للأغنية: ${existing.title}`);
+                    }
+                }
+                return res.status(200).json({ received: true, saved: 1, type: 'wav' });
+            }
+            
+            if (videoUrl) {
+                console.log(`✅ [WEBHOOK] تم استخراج فيديو: ${videoUrl}`);
+                if (taskId) {
+                    const existing = db.songs.find(s => s.taskId === taskId || s.taskId.includes(taskId) || taskId.includes(s.taskId));
+                    if (existing) {
+                        existing.videoUrl = videoUrl;
+                        existing.status = 'success';
+                        existing.updatedAt = new Date().toISOString();
+                        db.save();
+                        console.log(`✅ [WEBHOOK] تم تحديث الفيديو للأغنية: ${existing.title}`);
+                    }
+                }
+                return res.status(200).json({ received: true, saved: 1, type: 'video' });
+            }
+            
+            console.warn('⚠️ [WEBHOOK] لم يتم العثور على مقاطع أو روابط');
+            return res.status(200).json({ received: true, error: 'No clips or links found' });
         }
 
-        // إذا كان هناك audio_url مباشر، نعتبره مقطعاً واحداً
-        if (clips.length === 0 && body.audio_url) {
-            clips = [body];
-            console.log('🔍 [WEBHOOK] استخدام audio_url المباشر');
-        }
-
+        // ============================================================
+        // معالجة الحالة 1 (توليد الأغنية) - المتابعة من هنا
+        // ============================================================
         if (clips.length === 0) {
             console.warn('⚠️ [WEBHOOK] لم يتم العثور على مقاطع');
             return res.status(200).json({ received: true, error: 'No clips found' });
@@ -657,7 +836,6 @@ app.post('/webhook', (req, res) => {
         let updatedCount = 0;
 
         clips.forEach((clip, index) => {
-            // محاولة استخراج جميع الحقول الممكنة
             const audioUrl = clip.audio_url || clip.audioUrl || clip.url || clip.downloadUrl || clip.streamUrl || null;
             const videoUrl = clip.video_url || clip.videoUrl || clip.mp4_url || clip.mp4Url || clip.video || null;
             const imageUrl = clip.image_url || clip.imageUrl || clip.coverUrl || clip.cover_url || null;

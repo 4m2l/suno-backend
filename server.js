@@ -126,7 +126,7 @@ if (!db.users.find(u => u.username === 'admin')) {
 }
 
 // ============================================================
-// نقاط نهاية المصادقة
+// نقاط نهاية المصادقة (كما هي)
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
@@ -205,7 +205,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني (خاصة بالمستخدم)
+// نقاط نهاية الأغاني (كما هي)
 // ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
@@ -578,12 +578,10 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook الرئيسي (مع تحديث الأغاني المعلقة)
+// Webhook الرئيسي
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
-    console.log('📦 [WEBHOOK] Headers:', JSON.stringify(req.headers, null, 2));
-    console.log('📦 [WEBHOOK] Query:', req.query);
     console.log('📦 [WEBHOOK] Body:', JSON.stringify(req.body, null, 2));
 
     try {
@@ -591,93 +589,55 @@ app.post('/webhook', (req, res) => {
         const userId = req.query.userId || null;
         console.log(`👤 [WEBHOOK] userId من query: ${userId}`);
 
-        if (!userId) {
-            console.warn('⚠️ [WEBHOOK] userId غير موجود في query!');
-        }
-
         let clips = [];
         let taskId = null;
 
         if (body?.data?.data && Array.isArray(body.data.data)) {
             clips = body.data.data;
             taskId = body.data.task_id || body.task_id || null;
-            console.log(`📌 [WEBHOOK] استخراج من body.data.data, taskId: ${taskId}`);
         } else if (body?.data && Array.isArray(body.data)) {
             clips = body.data;
             taskId = body.task_id || null;
-            console.log(`📌 [WEBHOOK] استخراج من body.data, taskId: ${taskId}`);
         } else if (body?.clips && Array.isArray(body.clips)) {
             clips = body.clips;
             taskId = body.task_id || null;
-            console.log(`📌 [WEBHOOK] استخراج من body.clips, taskId: ${taskId}`);
         } else if (Array.isArray(body)) {
             clips = body;
-            console.log(`📌 [WEBHOOK] استخراج من الجسم الرئيسي (مصفوفة)`);
-        } else {
-            for (const key in body) {
-                if (Array.isArray(body[key])) {
-                    clips = body[key];
-                    console.log(`📌 [WEBHOOK] استخراج من body.${key} (مصفوفة)`);
-                    break;
-                }
-            }
         }
 
         if (clips.length === 0) {
-            console.warn('⚠️ [WEBHOOK] لم يتم العثور على أي مقاطع صوتية في البايلود');
-            return res.status(200).json({ received: true, error: 'No clips found', body: body });
+            console.warn('⚠️ [WEBHOOK] لم يتم العثور على مقاطع');
+            return res.status(200).json({ received: true, error: 'No clips found' });
         }
 
-        console.log(`🎵 [WEBHOOK] عدد المقاطع المستلمة: ${clips.length}`);
+        console.log(`🎵 [WEBHOOK] عدد المقاطع: ${clips.length}`);
         let savedCount = 0;
         let updatedCount = 0;
 
         clips.forEach((clip, index) => {
-            const audioUrl = clip.audio_url || clip.audioUrl || clip.url || clip.downloadUrl || clip.streamUrl || clip.audio || null;
-            const imageUrl = clip.image_url || clip.imageUrl || clip.coverUrl || clip.cover_url || null;
-            const title = clip.title || clip.name || clip.songName || clip.song_title || `مقطع ${index + 1}`;
-            const style = clip.tags || clip.style || clip.genre || '';
-            const duration = clip.duration || clip.duration_sec || clip.duration_ms ? clip.duration_ms / 1000 : null;
-            const prompt = clip.prompt || clip.lyrics || clip.text || '';
-            const audioId = clip.id || clip.audioId || clip.clip_id || clip.audio_id || `clip-${index}`;
-            const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
+            const audioUrl = clip.audio_url || clip.audioUrl || clip.url || null;
             const videoUrl = clip.video_url || clip.videoUrl || null;
-            const lyrics = clip.lyrics || clip.text || null;
-            const instrumentalUrl = clip.instrumental_url || clip.instrumentalUrl || null;
-            const vocalsUrl = clip.vocals_url || clip.vocalsUrl || null;
-            const wavUrl = clip.wav_url || clip.wavUrl || null;
-            const midiUrl = clip.midi_url || clip.midiUrl || null;
-
-            console.log(`🔄 [WEBHOOK] المقطع ${index + 1}: "${title}" - رابط الصوت: ${audioUrl ? 'موجود ✅' : 'غير موجود ❌'} - رابط الفيديو: ${videoUrl ? 'موجود ✅' : 'غير موجود ❌'}`);
+            const title = clip.title || clip.name || `مقطع ${index + 1}`;
+            const audioId = clip.id || clip.audioId || `clip-${index}`;
+            const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
 
             const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
 
             if (existingSong) {
                 let updated = false;
-                if (audioUrl && audioUrl.startsWith('https://') && !existingSong.audioUrl) {
+                if (audioUrl && !existingSong.audioUrl) {
                     existingSong.audioUrl = audioUrl;
                     existingSong.downloadUrl = audioUrl;
                     existingSong.status = 'success';
                     updated = true;
                 }
-                if (videoUrl && videoUrl.startsWith('https://') && !existingSong.videoUrl) {
+                if (videoUrl && !existingSong.videoUrl) {
                     existingSong.videoUrl = videoUrl;
                     updated = true;
-                    console.log(`🎬 [WEBHOOK] تم تحديث رابط الفيديو: ${videoUrl}`);
                 }
-                if (lyrics && !existingSong.lyrics) { existingSong.lyrics = lyrics; updated = true; }
-                if (instrumentalUrl && !existingSong.instrumentalUrl) { existingSong.instrumentalUrl = instrumentalUrl; updated = true; }
-                if (vocalsUrl && !existingSong.vocalsUrl) { existingSong.vocalsUrl = vocalsUrl; updated = true; }
-                if (wavUrl && !existingSong.wavUrl) { existingSong.wavUrl = wavUrl; updated = true; }
-                if (midiUrl && !existingSong.midiUrl) { existingSong.midiUrl = midiUrl; updated = true; }
-                if (imageUrl) existingSong.imageUrl = imageUrl;
-                if (duration) existingSong.duration = duration;
-                if (title) existingSong.title = title;
-                if (style) existingSong.style = style;
                 if (updated) {
                     existingSong.updatedAt = new Date().toISOString();
                     updatedCount++;
-                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: "${existingSong.title}"`);
                 }
             } else {
                 const song = {
@@ -687,40 +647,35 @@ app.post('/webhook', (req, res) => {
                     audioId: audioId,
                     audioUrl: audioUrl,
                     downloadUrl: audioUrl || null,
-                    imageUrl: imageUrl || null,
-                    title: title || 'بدون عنوان',
-                    style: style || '',
-                    prompt: prompt || '',
-                    duration: duration || null,
-                    videoUrl: videoUrl || null,
+                    imageUrl: clip.image_url || clip.imageUrl || null,
+                    title: title,
+                    style: clip.tags || clip.style || '',
+                    prompt: clip.prompt || '',
+                    duration: clip.duration || null,
+                    videoUrl: videoUrl,
                     status: audioUrl ? 'success' : 'pending',
                     isShared: false,
                     likes: 0,
                     commentsCount: 0,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
-                    lyrics: lyrics || null,
-                    instrumentalUrl: instrumentalUrl || null,
-                    vocalsUrl: vocalsUrl || null,
-                    wavUrl: wavUrl || null,
-                    midiUrl: midiUrl || null
+                    lyrics: clip.lyrics || null,
+                    instrumentalUrl: clip.instrumental_url || clip.instrumentalUrl || null,
+                    vocalsUrl: clip.vocals_url || clip.vocalsUrl || null,
+                    wavUrl: clip.wav_url || clip.wavUrl || null,
+                    midiUrl: clip.midi_url || clip.midiUrl || null
                 };
                 db.songs.push(song);
                 savedCount++;
                 if (userId) {
                     const user = findUserById(userId);
-                    if (user) {
-                        user.totalSongs = (user.totalSongs || 0) + 1;
-                        console.log(`✅ [WEBHOOK] تم تحديث عدد أغاني المستخدم ${user.username} إلى ${user.totalSongs}`);
-                    }
+                    if (user) user.totalSongs = (user.totalSongs || 0) + 1;
                 }
-                console.log(`✅ [WEBHOOK] تم حفظ الأغنية الجديدة: "${song.title}" (الحالة: ${song.status})`);
             }
         });
 
         db.save();
-        db.addAuditLog('webhook_received', userId || 'system', { count: savedCount, updated: updatedCount });
-        console.log(`💾 [WEBHOOK] تم حفظ ${savedCount} أغنية جديدة وتحديث ${updatedCount} أغنية`);
+        console.log(`💾 [WEBHOOK] حفظ ${savedCount} جديدة وتحديث ${updatedCount}`);
         return res.status(200).json({ received: true, saved: savedCount, updated: updatedCount });
 
     } catch (error) {
@@ -730,54 +685,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // ============================================================
-// نقطة اختبار Webhook يدوياً (POST)
-// ============================================================
-app.post('/webhook-test', (req, res) => {
-    console.log('🧪 [WEBHOOK-TEST] تم استقبال طلب اختبار');
-    const userId = req.query.userId || req.body.userId || null;
-    console.log(`👤 [WEBHOOK-TEST] userId: ${userId}`);
-
-    const testData = {
-        data: {
-            data: [
-                {
-                    id: 'test-' + Date.now(),
-                    audio_url: 'https://example.com/test-song-' + Date.now() + '.mp3',
-                    title: 'أغنية اختبار ' + new Date().toLocaleTimeString(),
-                    style: 'pop, test',
-                    duration: 180,
-                    image_url: 'https://via.placeholder.com/300x300/1a1a2e/ffffff?text=Test',
-                    video_url: 'https://example.com/test-video-' + Date.now() + '.mp4',
-                    lyrics: 'هذه كلمات اختبارية للأغنية',
-                    instrumental_url: 'https://example.com/test-instrumental.mp3',
-                    vocals_url: 'https://example.com/test-vocals.mp3',
-                    wav_url: 'https://example.com/test.wav',
-                    midi_url: 'https://example.com/test.midi'
-                }
-            ],
-            task_id: 'test-task-' + Date.now()
-        }
-    };
-
-    console.log('📦 [WEBHOOK-TEST] بيانات الاختبار:', JSON.stringify(testData, null, 2));
-
-    const mockReq = {
-        body: testData,
-        query: { userId: userId }
-    };
-
-    const webhookHandler = app._router.stack.find(layer => layer.route && layer.route.path === '/webhook');
-    if (webhookHandler) {
-        req.body = mockReq.body;
-        req.query = mockReq.query;
-        webhookHandler.handle(req, res);
-    } else {
-        res.status(500).json({ error: 'Webhook handler not found' });
-    }
-});
-
-// ============================================================
-// Proxy لـ Suno API (مع نقاط النهاية الصحيحة)
+// Proxy لـ Suno API (مع Base URL الصحيح)
 // ============================================================
 app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     try {
@@ -787,10 +695,9 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: 'API Key required' });
         }
 
-        // إزالة apiKey من الجسم قبل الإرسال
         const { apiKey: _, ...payload } = req.body;
 
-        // ⭐ إضافة callBackUrl فقط للنقاط التي تتطلبها (حسب التوثيق)
+        // إضافة callBackUrl للنقاط التي تحتاجها
         const endpointsWithCallback = [
             'generate', 
             'generate/upload-cover', 
@@ -802,13 +709,11 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
         }
 
-        // ⭐ استخدام الخادم الأساسي الصحيح
-        const baseUrl = 'https://sunoapiorg.redpandaai.co';
-        const sunoUrl = `${baseUrl}/api/v1/${endpoint}`;
+        // ⭐ Base URL الأصلي (الذي كان يعمل)
+        const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
         console.log(`🔄 Proxy to Suno: ${sunoUrl}`);
         console.log('📦 Payload:', JSON.stringify(payload, null, 2));
 
-        // مهلة 30 ثانية
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -830,7 +735,7 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         console.log(`📊 Proxy response status: ${response.status}`);
         console.log('📊 Proxy response data:', JSON.stringify(data, null, 2));
 
-        // حفظ النتيجة في قاعدة البيانات (إذا كانت الاستجابة ناجحة)
+        // حفظ النتيجة في قاعدة البيانات
         if (response.ok) {
             let clips = [];
             let taskId = data.task_id || data.data?.task_id || null;
@@ -888,16 +793,14 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
                             const user = findUserById(req.user.id);
                             if (user) user.totalSongs = (user.totalSongs || 0) + 1;
                             savedCount++;
-                            console.log(`✅ Proxy: تم حفظ الأغنية: ${song.title} - فيديو: ${videoUrl ? '✅' : '❌'}`);
+                            console.log(`✅ Proxy: تم حفظ الأغنية: ${song.title}`);
                         } else {
-                            // تحديث الأغنية الموجودة
                             const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
                             if (existingSong) {
                                 if (videoUrl && !existingSong.videoUrl) {
                                     existingSong.videoUrl = videoUrl;
                                     existingSong.updatedAt = new Date().toISOString();
                                     db.save();
-                                    console.log(`🔄 Proxy: تم تحديث الفيديو للأغنية: ${existingSong.title}`);
                                 }
                                 if (audioUrl && !existingSong.audioUrl) {
                                     existingSong.audioUrl = audioUrl;
@@ -915,7 +818,6 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             }
         }
 
-        // إعادة الرد كما هو، مع إضافة تفاصيل الخطأ إن وجدت
         if (!response.ok) {
             res.status(response.status).json({
                 error: data?.message || data?.error || 'Suno API error',
@@ -929,8 +831,7 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         console.error('Proxy error:', error);
         res.status(500).json({ 
             error: 'Proxy request failed', 
-            details: error.message,
-            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            details: error.message
         });
     }
 });
@@ -943,10 +844,7 @@ app.get('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: 'API Key required' });
         }
 
-        const baseUrl = 'https://sunoapiorg.redpandaai.co';
-        const sunoUrl = `${baseUrl}/api/v1/${endpoint}`;
-        console.log(`🔄 Proxy GET to Suno: ${sunoUrl}`);
-
+        const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
         const response = await fetch(sunoUrl, {
             method: 'GET',
             headers: {
@@ -990,12 +888,8 @@ app.listen(PORT, () => {
     console.log(`   ✨ POST /api/auth/register`);
     console.log(`   👤 GET  /api/users/me`);
     console.log(`   🎵 GET  /api/songs (auth required)`);
-    console.log(`   🎵 GET  /songs-debug (public, debug)`);
-    console.log(`   🎵 GET  /songs/user/:userId (public, debug)`);
     console.log(`   📨 POST /webhook (Suno callback)`);
-    console.log(`   🧪 POST /webhook-test?userId=xxx (test webhook)`);
     console.log(`   🔄 POST /api/proxy/suno/:endpoint (proxy to Suno API)`);
-    console.log(`   🔄 GET  /api/proxy/suno/:endpoint (proxy GET to Suno API)`);
     console.log(`   🏠 GET  /healthz`);
     console.log(`👑 Admin: admin@example.com / admin123`);
 });

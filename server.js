@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3000;
 const INTERNAL_WEBHOOK = `https://suno-backend-production.up.railway.app/webhook`;
 
 // ============================================================
-// ⭐ نقاط النهاية التي تحتاج callBackUrl
+// ⭐ نقاط النهاية التي تحتاج callBackUrl (جميع النقاط المدعومة)
 // ============================================================
 const endpointsWithCallback = [
     'generate',
@@ -31,6 +31,7 @@ const endpointsWithCallback = [
     'style/generate',
     'suno/cover/generate',
     'wav/generate',
+    'midi/generate',
     'vocal-removal/generate'
 ];
 
@@ -770,8 +771,9 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         try { data = JSON.parse(responseText); } catch (e) { data = { raw: responseText }; }
 
         console.log(`📊 Proxy response status: ${response.status}`);
+        console.log('📊 Proxy response data:', JSON.stringify(data, null, 2));
 
-        // ⭐ حفظ النتيجة في السجل (حتى لو كانت الاستجابة فورية)
+        // حفظ النتيجة في قاعدة البيانات (إذا كانت الاستجابة ناجحة)
         if (response.ok) {
             let clips = [];
             let taskId = data.task_id || data.data?.task_id || null;
@@ -988,6 +990,7 @@ app.listen(PORT, () => {
     console.log(`   🎵 GET  /api/songs (auth required)`);
     console.log(`   📨 POST /webhook (Suno callback)`);
     console.log(`   🔄 POST /api/proxy/suno/:endpoint (proxy to Suno API)`);
+    console.log(`   🔄 GET  /api/proxy/suno/:endpoint (proxy GET to Suno API)`);
     console.log(`   🏠 GET  /healthz`);
     console.log(`👑 Admin: admin@example.com / admin123`);
 });

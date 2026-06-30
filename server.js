@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ============================================================
-// ⭐ تعريف INTERNAL_WEBHOOK (المفقود سابقاً)
+// ⭐ تعريف INTERNAL_WEBHOOK
 // ============================================================
 const INTERNAL_WEBHOOK = `https://suno-backend-production.up.railway.app/webhook`;
 
@@ -777,7 +777,7 @@ app.post('/webhook-test', (req, res) => {
 });
 
 // ============================================================
-// Proxy لـ Suno API (مع تحسين معالجة callBackUrl والأخطاء)
+// Proxy لـ Suno API (مع نقاط النهاية الصحيحة)
 // ============================================================
 app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     try {
@@ -790,13 +790,21 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         // إزالة apiKey من الجسم قبل الإرسال
         const { apiKey: _, ...payload } = req.body;
 
-        // ⭐ إضافة callBackUrl فقط للنقاط التي تحتاجها
-        const endpointsWithCallback = ['generate', 'generate/upload-cover', 'mp4/generate', 'voice/generate', 'suno/cover/generate'];
+        // ⭐ إضافة callBackUrl فقط للنقاط التي تتطلبها (حسب التوثيق)
+        const endpointsWithCallback = [
+            'generate', 
+            'generate/upload-cover', 
+            'generate/upload-extend', 
+            'mp4/generate', 
+            'voice/generate'
+        ];
         if (endpointsWithCallback.includes(endpoint)) {
             payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
         }
 
-        const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
+        // ⭐ استخدام الخادم الأساسي الصحيح
+        const baseUrl = 'https://sunoapiorg.redpandaai.co';
+        const sunoUrl = `${baseUrl}/api/v1/${endpoint}`;
         console.log(`🔄 Proxy to Suno: ${sunoUrl}`);
         console.log('📦 Payload:', JSON.stringify(payload, null, 2));
 
@@ -891,7 +899,6 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
                                     db.save();
                                     console.log(`🔄 Proxy: تم تحديث الفيديو للأغنية: ${existingSong.title}`);
                                 }
-                                // تحديث الحقول الأخرى إذا كانت جديدة
                                 if (audioUrl && !existingSong.audioUrl) {
                                     existingSong.audioUrl = audioUrl;
                                     existingSong.downloadUrl = audioUrl;
@@ -910,7 +917,6 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
 
         // إعادة الرد كما هو، مع إضافة تفاصيل الخطأ إن وجدت
         if (!response.ok) {
-            // إرجاع رسالة الخطأ من Suno API
             res.status(response.status).json({
                 error: data?.message || data?.error || 'Suno API error',
                 status: response.status,
@@ -937,7 +943,8 @@ app.get('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
             return res.status(400).json({ error: 'API Key required' });
         }
 
-        const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
+        const baseUrl = 'https://sunoapiorg.redpandaai.co';
+        const sunoUrl = `${baseUrl}/api/v1/${endpoint}`;
         console.log(`🔄 Proxy GET to Suno: ${sunoUrl}`);
 
         const response = await fetch(sunoUrl, {

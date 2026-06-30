@@ -703,11 +703,12 @@ app.post('/webhook', (req, res) => {
 });
 
 // ============================================================
-// ⭐⭐⭐ PROXY FOR SUNO API (الحل النهائي)
+// ⭐⭐⭐ PROXY FOR SUNO API (الإصدار النهائي - يعمل مع جميع النقاط)
 // ============================================================
-app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
+app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
     try {
-        const endpoint = req.params.endpoint;
+        // استخراج الـ endpoint من المسار (بما في ذلك الأجزاء التي تحتوي على /)
+        const endpoint = req.params[0] || req.path.replace('/api/proxy/suno/', '');
         const apiKey = req.body.apiKey || req.headers['x-api-key'];
         if (!apiKey) {
             return res.status(400).json({ error: 'API Key required' });
@@ -761,9 +762,9 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     }
 });
 
-app.get('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
+app.get('/api/proxy/suno/*', authMiddleware, async (req, res) => {
     try {
-        const endpoint = req.params.endpoint;
+        const endpoint = req.params[0] || req.path.replace('/api/proxy/suno/', '');
         const apiKey = req.headers['x-api-key'];
         if (!apiKey) {
             return res.status(400).json({ error: 'API Key required' });
@@ -816,8 +817,8 @@ app.listen(PORT, () => {
     console.log(`   👤 GET  /api/users/me`);
     console.log(`   🎵 GET  /api/songs (auth required)`);
     console.log(`   📨 POST /webhook (Suno callback)`);
-    console.log(`   🔄 POST /api/proxy/suno/:endpoint (proxy to Suno API)`);
-    console.log(`   🔄 GET  /api/proxy/suno/:endpoint (proxy GET to Suno API)`);
+    console.log(`   🔄 POST /api/proxy/suno/* (proxy to Suno API)`);
+    console.log(`   🔄 GET  /api/proxy/suno/* (proxy GET to Suno API)`);
     console.log(`   🏠 GET  /healthz`);
     console.log(`👑 Admin: admin@example.com / admin123`);
 });

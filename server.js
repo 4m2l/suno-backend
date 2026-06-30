@@ -13,6 +13,28 @@ const PORT = process.env.PORT || 3000;
 const INTERNAL_WEBHOOK = `https://suno-backend-production.up.railway.app/webhook`;
 
 // ============================================================
+// ⭐ نقاط النهاية التي تحتاج callBackUrl
+// ============================================================
+const endpointsWithCallback = [
+    'generate',
+    'generate/extend',
+    'generate/upload-cover',
+    'generate/upload-extend',
+    'generate/add-instrumental',
+    'generate/add-vocals',
+    'generate/sounds',
+    'generate/replace-section',
+    'generate/generate-persona',
+    'generate/get-timestamped-lyrics',
+    'mp4/generate',
+    'lyrics',
+    'style/generate',
+    'suno/cover/generate',
+    'wav/generate',
+    'vocal-removal/generate'
+];
+
+// ============================================================
 // إعدادات CORS
 // ============================================================
 app.use(cors({
@@ -126,7 +148,7 @@ if (!db.users.find(u => u.username === 'admin')) {
 }
 
 // ============================================================
-// نقاط نهاية المصادقة (كما هي)
+// نقاط نهاية المصادقة
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
@@ -205,7 +227,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني (كما هي)
+// نقاط نهاية الأغاني (خاصة بالمستخدم)
 // ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
@@ -635,9 +657,30 @@ app.post('/webhook', (req, res) => {
                     existingSong.videoUrl = videoUrl;
                     updated = true;
                 }
+                if (clip.lyrics && !existingSong.lyrics) {
+                    existingSong.lyrics = clip.lyrics;
+                    updated = true;
+                }
+                if (clip.instrumental_url && !existingSong.instrumentalUrl) {
+                    existingSong.instrumentalUrl = clip.instrumental_url;
+                    updated = true;
+                }
+                if (clip.vocals_url && !existingSong.vocalsUrl) {
+                    existingSong.vocalsUrl = clip.vocals_url;
+                    updated = true;
+                }
+                if (clip.wav_url && !existingSong.wavUrl) {
+                    existingSong.wavUrl = clip.wav_url;
+                    updated = true;
+                }
+                if (clip.midi_url && !existingSong.midiUrl) {
+                    existingSong.midiUrl = clip.midi_url;
+                    updated = true;
+                }
                 if (updated) {
                     existingSong.updatedAt = new Date().toISOString();
                     updatedCount++;
+                    console.log(`🔄 [WEBHOOK] تم تحديث الأغنية: ${existingSong.title}`);
                 }
             } else {
                 const song = {
@@ -671,6 +714,7 @@ app.post('/webhook', (req, res) => {
                     const user = findUserById(userId);
                     if (user) user.totalSongs = (user.totalSongs || 0) + 1;
                 }
+                console.log(`✅ [WEBHOOK] تم حفظ الأغنية الجديدة: ${song.title}`);
             }
         });
 
@@ -685,7 +729,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // ============================================================
-// Proxy لـ Suno API (مع Base URL الصحيح)
+// Proxy لـ Suno API (مع حفظ جميع النتائج في السجل)
 // ============================================================
 app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
     try {
@@ -697,23 +741,16 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
 
         const { apiKey: _, ...payload } = req.body;
 
-        // إضافة callBackUrl للنقاط التي تحتاجها
-        const endpointsWithCallback = [
-            'generate', 
-            'generate/upload-cover', 
-            'generate/upload-extend', 
-            'mp4/generate', 
-            'voice/generate'
-        ];
+        // ⭐ إضافة callBackUrl للنقاط التي تحتاجها
         if (endpointsWithCallback.includes(endpoint)) {
             payload.callBackUrl = `${INTERNAL_WEBHOOK}?userId=${req.user.id}`;
         }
 
-        // ⭐ Base URL الأصلي (الذي كان يعمل)
         const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
         console.log(`🔄 Proxy to Suno: ${sunoUrl}`);
         console.log('📦 Payload:', JSON.stringify(payload, null, 2));
 
+        // مهلة 30 ثانية
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 30000);
 
@@ -733,9 +770,8 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         try { data = JSON.parse(responseText); } catch (e) { data = { raw: responseText }; }
 
         console.log(`📊 Proxy response status: ${response.status}`);
-        console.log('📊 Proxy response data:', JSON.stringify(data, null, 2));
 
-        // حفظ النتيجة في قاعدة البيانات
+        // ⭐ حفظ النتيجة في السجل (حتى لو كانت الاستجابة فورية)
         if (response.ok) {
             let clips = [];
             let taskId = data.task_id || data.data?.task_id || null;
@@ -759,62 +795,122 @@ app.post('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
                 clips.forEach(clip => {
                     const audioUrl = clip.audio_url || clip.audioUrl || clip.url || null;
                     const videoUrl = clip.video_url || clip.videoUrl || null;
-                    if (audioUrl || videoUrl) {
-                        const audioId = clip.id || clip.audioId || `clip-${Date.now()}`;
-                        const clipTaskId = clip.task_id || clip.taskId || taskId || `task-${Date.now()}`;
-                        const existing = db.songs.some(s => s.taskId === clipTaskId && s.audioId === audioId);
-                        if (!existing) {
-                            const song = {
-                                id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
-                                userId: req.user.id,
-                                taskId: clipTaskId,
-                                audioId: audioId,
-                                audioUrl: audioUrl,
-                                downloadUrl: clip.audio_url || clip.audioUrl || audioUrl,
-                                imageUrl: clip.image_url || clip.imageUrl || null,
-                                title: clip.title || clip.name || 'بدون عنوان',
-                                style: clip.tags || clip.style || clip.genre || '',
-                                prompt: clip.prompt || clip.lyrics || '',
-                                duration: clip.duration || null,
-                                videoUrl: videoUrl,
-                                status: audioUrl ? 'success' : 'pending',
-                                isShared: false,
-                                likes: 0,
-                                commentsCount: 0,
-                                createdAt: new Date().toISOString(),
-                                updatedAt: new Date().toISOString(),
-                                lyrics: clip.lyrics || null,
-                                instrumentalUrl: clip.instrumental_url || clip.instrumentalUrl || null,
-                                vocalsUrl: clip.vocals_url || clip.vocalsUrl || null,
-                                wavUrl: clip.wav_url || clip.wavUrl || null,
-                                midiUrl: clip.midi_url || clip.midiUrl || null
-                            };
-                            db.songs.push(song);
-                            const user = findUserById(req.user.id);
-                            if (user) user.totalSongs = (user.totalSongs || 0) + 1;
-                            savedCount++;
-                            console.log(`✅ Proxy: تم حفظ الأغنية: ${song.title}`);
-                        } else {
-                            const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
-                            if (existingSong) {
-                                if (videoUrl && !existingSong.videoUrl) {
-                                    existingSong.videoUrl = videoUrl;
-                                    existingSong.updatedAt = new Date().toISOString();
-                                    db.save();
-                                }
-                                if (audioUrl && !existingSong.audioUrl) {
-                                    existingSong.audioUrl = audioUrl;
-                                    existingSong.downloadUrl = audioUrl;
-                                    existingSong.status = 'success';
-                                    existingSong.updatedAt = new Date().toISOString();
-                                    db.save();
-                                }
+                    const audioId = clip.id || clip.audioId || `clip-${Date.now()}`;
+                    const clipTaskId = clip.task_id || clip.taskId || taskId || `task-${Date.now()}`;
+                    
+                    const existing = db.songs.some(s => s.taskId === clipTaskId && s.audioId === audioId);
+                    if (!existing) {
+                        const song = {
+                            id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                            userId: req.user.id,
+                            taskId: clipTaskId,
+                            audioId: audioId,
+                            audioUrl: audioUrl,
+                            downloadUrl: clip.audio_url || clip.audioUrl || audioUrl,
+                            imageUrl: clip.image_url || clip.imageUrl || null,
+                            title: clip.title || clip.name || 'بدون عنوان',
+                            style: clip.tags || clip.style || clip.genre || '',
+                            prompt: clip.prompt || clip.lyrics || '',
+                            duration: clip.duration || null,
+                            videoUrl: videoUrl,
+                            status: audioUrl ? 'success' : 'pending',
+                            isShared: false,
+                            likes: 0,
+                            commentsCount: 0,
+                            createdAt: new Date().toISOString(),
+                            updatedAt: new Date().toISOString(),
+                            lyrics: clip.lyrics || null,
+                            instrumentalUrl: clip.instrumental_url || clip.instrumentalUrl || null,
+                            vocalsUrl: clip.vocals_url || clip.vocalsUrl || null,
+                            wavUrl: clip.wav_url || clip.wavUrl || null,
+                            midiUrl: clip.midi_url || clip.midiUrl || null
+                        };
+                        db.songs.push(song);
+                        const user = findUserById(req.user.id);
+                        if (user) user.totalSongs = (user.totalSongs || 0) + 1;
+                        savedCount++;
+                        console.log(`✅ Proxy: تم حفظ الأغنية: ${song.title}`);
+                    } else {
+                        const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
+                        if (existingSong) {
+                            let updated = false;
+                            if (audioUrl && !existingSong.audioUrl) {
+                                existingSong.audioUrl = audioUrl;
+                                existingSong.downloadUrl = audioUrl;
+                                existingSong.status = 'success';
+                                updated = true;
+                            }
+                            if (videoUrl && !existingSong.videoUrl) {
+                                existingSong.videoUrl = videoUrl;
+                                updated = true;
+                            }
+                            if (clip.lyrics && !existingSong.lyrics) {
+                                existingSong.lyrics = clip.lyrics;
+                                updated = true;
+                            }
+                            if (clip.instrumental_url && !existingSong.instrumentalUrl) {
+                                existingSong.instrumentalUrl = clip.instrumental_url;
+                                updated = true;
+                            }
+                            if (clip.vocals_url && !existingSong.vocalsUrl) {
+                                existingSong.vocalsUrl = clip.vocals_url;
+                                updated = true;
+                            }
+                            if (clip.wav_url && !existingSong.wavUrl) {
+                                existingSong.wavUrl = clip.wav_url;
+                                updated = true;
+                            }
+                            if (clip.midi_url && !existingSong.midiUrl) {
+                                existingSong.midiUrl = clip.midi_url;
+                                updated = true;
+                            }
+                            if (updated) {
+                                existingSong.updatedAt = new Date().toISOString();
+                                db.save();
+                                console.log(`🔄 Proxy: تم تحديث الأغنية: ${existingSong.title}`);
                             }
                         }
                     }
                 });
                 if (savedCount > 0) db.save();
                 data._saved = savedCount;
+            } else {
+                // ⭐ إذا لم تكن هناك مقاطع فورية، أنشئ سجلاً معلقاً (Pending)
+                const taskId = data.task_id || data.id || `task-${Date.now()}`;
+                const audioId = `pending-${Date.now()}`;
+                
+                const existing = db.songs.some(s => s.taskId === taskId);
+                if (!existing) {
+                    const song = {
+                        id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+                        userId: req.user.id,
+                        taskId: taskId,
+                        audioId: audioId,
+                        audioUrl: null,
+                        downloadUrl: null,
+                        imageUrl: null,
+                        title: `⏳ جاري المعالجة... (${endpoint})`,
+                        style: '',
+                        prompt: '',
+                        duration: null,
+                        videoUrl: null,
+                        status: 'pending',
+                        isShared: false,
+                        likes: 0,
+                        commentsCount: 0,
+                        createdAt: new Date().toISOString(),
+                        updatedAt: new Date().toISOString(),
+                        lyrics: null,
+                        instrumentalUrl: null,
+                        vocalsUrl: null,
+                        wavUrl: null,
+                        midiUrl: null
+                    };
+                    db.songs.push(song);
+                    db.save();
+                    console.log(`⏳ Proxy: تم إنشاء سجل معلق للمهمة: ${taskId}`);
+                    data._pending = true;
+                }
             }
         }
 
@@ -845,6 +941,8 @@ app.get('/api/proxy/suno/:endpoint', authMiddleware, async (req, res) => {
         }
 
         const sunoUrl = `https://api.sunoapi.org/api/v1/${endpoint}`;
+        console.log(`🔄 Proxy GET to Suno: ${sunoUrl}`);
+
         const response = await fetch(sunoUrl, {
             method: 'GET',
             headers: {

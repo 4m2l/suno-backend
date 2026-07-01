@@ -5,6 +5,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { google } = require('googleapis');
 
+// تحميل متغيرات البيئة (في حالة استخدام .env)
+try {
+    require('dotenv').config();
+} catch (e) {
+    // تجاهل إذا لم يكن dotenv مثبتاً
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 

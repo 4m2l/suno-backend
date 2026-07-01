@@ -63,7 +63,8 @@ class Database {
             comments: [], 
             likes: [], 
             auditLogs: [],
-            notifications: [] 
+            notifications: [],
+            messages: [] // <--- جديد: جدول الرسائل
         };
         this.load();
     }
@@ -94,6 +95,8 @@ class Database {
     set auditLogs(v) { this.data.auditLogs = v; this.save(); }
     get notifications() { return this.data.notifications; }
     set notifications(v) { this.data.notifications = v; this.save(); }
+    get messages() { return this.data.messages; } // <--- جديد
+    set messages(v) { this.data.messages = v; this.save(); }
     
     addAuditLog(action, userId, details) {
         this.auditLogs.push({
@@ -120,6 +123,31 @@ class Database {
         if (this.notifications.length > 500) this.notifications = this.notifications.slice(-500);
         this.save();
         return notif;
+    }
+    addMessage(fromUserId, toUserId, text) {
+        const msg = {
+            id: 'msg-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+            fromUserId: fromUserId,
+            toUserId: toUserId,
+            text: text,
+            read: false,
+            createdAt: new Date().toISOString()
+        };
+        this.messages.push(msg);
+        if (this.messages.length > 2000) this.messages = this.messages.slice(-2000);
+        this.save();
+        return msg;
+    }
+    getConversation(userId1, userId2) {
+        return this.messages
+            .filter(m => 
+                (m.fromUserId === userId1 && m.toUserId === userId2) ||
+                (m.fromUserId === userId2 && m.toUserId === userId1)
+            )
+            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    }
+    getUnreadMessages(userId) {
+        return this.messages.filter(m => m.toUserId === userId && !m.read);
     }
 }
 
@@ -152,7 +180,7 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// إنشاء Admin (حساب المدير الجديد)
+// إنشاء Admin
 // ============================================================
 const existingAdmin = db.users.find(u => u.role === 'admin');
 if (!existingAdmin) {
@@ -185,7 +213,7 @@ if (!existingAdmin) {
 }
 
 // ============================================================
-// نقاط نهاية المصادقة
+// نقاط نهاية المصادقة (موجودة)
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
@@ -284,7 +312,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني
+// نقاط نهاية الأغاني (موجودة)
 // ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
@@ -293,32 +321,10 @@ function getUserSongs(userId) {
 app.get('/api/songs', authMiddleware, (req, res) => {
     try {
         const userSongs = getUserSongs(req.user.id);
-        console.log(`📥 جلب أغاني المستخدم ${req.user.id}: ${userSongs.length} أغنية`);
         res.json({ total: userSongs.length, data: userSongs });
     } catch (error) {
         console.error('Error fetching songs:', error);
         res.status(500).json({ error: 'Failed to fetch songs' });
-    }
-});
-
-app.get('/songs-debug', (req, res) => {
-    try {
-        res.json({
-            total: db.songs.length,
-            data: db.songs.map(s => ({ id: s.id, userId: s.userId, title: s.title, audioUrl: s.audioUrl, status: s.status, videoUrl: s.videoUrl, taskId: s.taskId, audioId: s.audioId, wavUrl: s.wavUrl, midiUrl: s.midiUrl, lyrics: s.lyrics }))
-        });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed' });
-    }
-});
-
-app.get('/songs/user/:userId', (req, res) => {
-    try {
-        const userId = req.params.userId;
-        const userSongs = getUserSongs(userId);
-        res.json({ total: userSongs.length, data: userSongs });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed' });
     }
 });
 
@@ -463,6 +469,7 @@ app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
             songId: song.id,
             userId: req.user.id,
             username: req.user.username,
+            profileImage: req.user.profileImage || 'https://i.imgur.com/c8qwfZf.png', // <--- إضافة الصورة
             title: song.title,
             style: song.style,
             audioUrl: song.audioUrl,
@@ -502,20 +509,30 @@ app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// الأغاني المشتركة (عامة)
+// الأغاني المشتركة (عامة) - مع دعم الفلتر
 // ============================================================
-app.get('/api/shared-songs', (req, res) => {
+app.get('/api/shared-songs', authMiddleware, (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
-        const shared = db.sharedSongs
+        const filter = req.query.filter || 'all'; // 'all' أو 'following'
+        let shared = db.sharedSongs;
+        
+        // فلتر المتابَعون
+        if (filter === 'following') {
+            const followingIds = req.user.following || [];
+            shared = shared.filter(s => followingIds.includes(s.userId));
+        }
+        
+        shared = shared
             .sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt))
             .slice(0, limit);
+            
         const result = shared.map(s => {
             const likes = db.likes.filter(l => l.sharedSongId === s.id).length;
             const comments = db.comments.filter(c => c.sharedSongId === s.id).length;
             return { ...s, likes, commentsCount: comments, userLiked: false };
         });
-        res.json({ total: db.sharedSongs.length, data: result });
+        res.json({ total: db.sharedSongs.length, data: result, filter: filter });
     } catch (error) {
         console.error('Error fetching shared songs:', error);
         res.status(500).json({ error: 'Failed to fetch shared songs' });
@@ -703,37 +720,98 @@ app.get('/api/users/:userId/following', authMiddleware, (req, res) => {
     }
 });
 
-app.get('/api/notifications', authMiddleware, (req, res) => {
+// ============================================================
+// البحث عن المستخدمين (جديد)
+// ============================================================
+app.get('/api/users/search', authMiddleware, (req, res) => {
     try {
-        const userId = req.user.id;
-        const notifs = db.notifications
-            .filter(n => n.userId === userId)
-            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-            .slice(0, 100);
-
-        const unread = notifs.filter(n => !n.read).length;
-        res.json({ total: notifs.length, unread: unread, data: notifs });
+        const query = req.query.q?.trim()?.toLowerCase() || '';
+        if (!query || query.length < 2) {
+            return res.json({ data: [] });
+        }
+        const users = db.users
+            .filter(u => 
+                u.id !== req.user.id &&
+                (u.username.toLowerCase().includes(query) || 
+                 u.email.toLowerCase().includes(query))
+            )
+            .map(u => ({
+                id: u.id,
+                username: u.username,
+                profileImage: u.profileImage || 'https://i.imgur.com/c8qwfZf.png',
+                followersCount: (u.followers || []).length,
+                isFollowing: (u.followers || []).includes(req.user.id)
+            }))
+            .slice(0, 20);
+        res.json({ data: users });
     } catch (error) {
-        console.error('Error fetching notifications:', error);
-        res.status(500).json({ error: 'Failed to fetch notifications' });
-    }
-});
-
-app.put('/api/notifications/:id/read', authMiddleware, (req, res) => {
-    try {
-        const notifId = req.params.id;
-        const notif = db.notifications.find(n => n.id === notifId && n.userId === req.user.id);
-        if (!notif) return res.status(404).json({ error: 'Notification not found' });
-        notif.read = true;
-        db.save();
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: 'Failed to mark as read' });
+        console.error('Search error:', error);
+        res.status(500).json({ error: 'فشل البحث' });
     }
 });
 
 // ============================================================
-// الإعجابات والتعليقات (مع إشعارات)
+// نقاط نهاية المراسلة (جديد)
+// ============================================================
+app.get('/api/messages/:userId', authMiddleware, (req, res) => {
+    try {
+        const otherUserId = req.params.userId;
+        const conversation = db.getConversation(req.user.id, otherUserId);
+        res.json({ data: conversation });
+    } catch (error) {
+        console.error('Messages error:', error);
+        res.status(500).json({ error: 'فشل جلب الرسائل' });
+    }
+});
+
+app.post('/api/messages/:userId', authMiddleware, (req, res) => {
+    try {
+        const toUserId = req.params.userId;
+        const { text } = req.body;
+        if (!text || text.trim().length === 0) {
+            return res.status(400).json({ error: 'الرسالة فارغة' });
+        }
+        const toUser = findUserById(toUserId);
+        if (!toUser) return res.status(404).json({ error: 'المستخدم غير موجود' });
+        
+        const msg = db.addMessage(req.user.id, toUserId, text.trim());
+        // إشعار للمستخدم المستقبل
+        db.addNotification(toUserId, 'message', `${req.user.username} أرسل لك رسالة`, {
+            fromUserId: req.user.id,
+            fromUsername: req.user.username,
+            messageId: msg.id,
+            preview: text.trim().substring(0, 50)
+        });
+        res.status(201).json({ success: true, message: msg });
+    } catch (error) {
+        console.error('Send message error:', error);
+        res.status(500).json({ error: 'فشل إرسال الرسالة' });
+    }
+});
+
+app.put('/api/messages/read', authMiddleware, (req, res) => {
+    try {
+        const { messageIds } = req.body;
+        if (!messageIds || !Array.isArray(messageIds)) {
+            return res.status(400).json({ error: 'Invalid request' });
+        }
+        let updated = 0;
+        messageIds.forEach(id => {
+            const msg = db.messages.find(m => m.id === id && m.toUserId === req.user.id);
+            if (msg && !msg.read) {
+                msg.read = true;
+                updated++;
+            }
+        });
+        db.save();
+        res.json({ success: true, updated });
+    } catch (error) {
+        res.status(500).json({ error: 'فشل تحديث حالة القراءة' });
+    }
+});
+
+// ============================================================
+// الإعجابات والتعليقات (مع إشعارات) - موجودة
 // ============================================================
 app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
     try {
@@ -874,6 +952,9 @@ app.get('/api/stats', authMiddleware, (req, res) => {
         });
         const topStyles = Object.entries(styleCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([style, count]) => ({ style, count }));
 
+        // عدد الرسائل غير المقروءة
+        const unreadMessages = db.getUnreadMessages(user.id).length;
+
         res.json({
             totalSongs: total,
             sharedSongs: sharedCount,
@@ -884,7 +965,8 @@ app.get('/api/stats', authMiddleware, (req, res) => {
             songsThisWeek: songsThisWeek,
             songsThisMonth: songsThisMonth,
             topStyles,
-            averageDuration: userSongs.filter(s => s.duration).reduce((sum, s) => sum + (s.duration || 0), 0) / (userSongs.filter(s => s.duration).length || 1)
+            averageDuration: userSongs.filter(s => s.duration).reduce((sum, s) => sum + (s.duration || 0), 0) / (userSongs.filter(s => s.duration).length || 1),
+            unreadMessages: unreadMessages // <--- جديد
         });
     } catch (error) {
         console.error('Error fetching stats:', error);
@@ -893,7 +975,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook الرئيسي
+// Webhook الرئيسي (موجود)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
@@ -995,7 +1077,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // ============================================================
-// Proxy لـ Suno API
+// Proxy لـ Suno API (موجود)
 // ============================================================
 app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
     try {
@@ -1103,33 +1185,5 @@ app.get('/healthz', (req, res) => {
 app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`👑 Admin: info@msproductions.com / Msm12345`);
-    console.log(`📋 Endpoints:`);
-    console.log(`   🔐 POST /api/auth/login`);
-    console.log(`   ✨ POST /api/auth/register`);
-    console.log(`   👤 GET  /api/users/me`);
-    console.log(`   📋 GET  /api/users/:userId (profile)`);
-    console.log(`   ✏️ PUT  /api/users/profile (update profile)`);
-    console.log(`   👥 POST /api/users/:userId/follow`);
-    console.log(`   👥 DELETE /api/users/:userId/follow`);
-    console.log(`   📋 GET  /api/users/:userId/followers`);
-    console.log(`   📋 GET  /api/users/:userId/following`);
-    console.log(`   🔔 GET  /api/notifications`);
-    console.log(`   🔔 PUT  /api/notifications/:id/read`);
-    console.log(`   🎵 GET  /api/songs (auth required)`);
-    console.log(`   🎵 POST /api/songs`);
-    console.log(`   🎵 DELETE /api/songs/:songId`);
-    console.log(`   🎵 PUT  /api/songs/:songId`);
-    console.log(`   📤 POST /api/songs/:songId/share`);
-    console.log(`   📤 DELETE /api/songs/:songId/share`);
-    console.log(`   🌐 GET  /api/shared-songs`);
-    console.log(`   ❤️ POST /api/shared-songs/:sharedId/like`);
-    console.log(`   ❤️ DELETE /api/shared-songs/:sharedId/like`);
-    console.log(`   💬 POST /api/shared-songs/:sharedId/comments`);
-    console.log(`   💬 GET  /api/shared-songs/:sharedId/comments`);
-    console.log(`   💬 DELETE /api/comments/:commentId`);
-    console.log(`   📊 GET  /api/stats`);
-    console.log(`   📨 POST /webhook (Suno callback)`);
-    console.log(`   🔄 POST /api/proxy/suno/* (proxy to Suno API)`);
-    console.log(`   🔄 GET  /api/proxy/suno/* (proxy GET to Suno API)`);
-    console.log(`   🏠 GET  /healthz`);
+    console.log(`📋 Endpoints ready.`);
 });

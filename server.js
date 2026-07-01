@@ -56,7 +56,15 @@ const CONFIG = {
 
 class Database {
     constructor() {
-        this.data = { users: [], songs: [], sharedSongs: [], comments: [], likes: [], auditLogs: [] };
+        this.data = { 
+            users: [], 
+            songs: [], 
+            sharedSongs: [], 
+            comments: [], 
+            likes: [], 
+            auditLogs: [],
+            notifications: [] 
+        };
         this.load();
     }
     load() {
@@ -84,6 +92,9 @@ class Database {
     set likes(v) { this.data.likes = v; this.save(); }
     get auditLogs() { return this.data.auditLogs; }
     set auditLogs(v) { this.data.auditLogs = v; this.save(); }
+    get notifications() { return this.data.notifications; }
+    set notifications(v) { this.data.notifications = v; this.save(); }
+    
     addAuditLog(action, userId, details) {
         this.auditLogs.push({
             id: crypto.randomBytes(8).toString('hex'),
@@ -94,6 +105,21 @@ class Database {
         });
         if (this.auditLogs.length > 1000) this.auditLogs = this.auditLogs.slice(-1000);
         this.save();
+    }
+    addNotification(userId, type, message, data = {}) {
+        const notif = {
+            id: 'notif-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
+            userId: userId,
+            type: type,
+            message: message,
+            data: data,
+            read: false,
+            createdAt: new Date().toISOString()
+        };
+        this.notifications.push(notif);
+        if (this.notifications.length > 500) this.notifications = this.notifications.slice(-500);
+        this.save();
+        return notif;
     }
 }
 
@@ -126,15 +152,20 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// إنشاء Admin
+// إنشاء Admin (حساب المدير)
 // ============================================================
-if (!db.users.find(u => u.username === 'admin')) {
+const existingAdmin = db.users.find(u => u.role === 'admin');
+if (!existingAdmin) {
     const admin = {
         id: 'admin-' + crypto.randomBytes(4).toString('hex'),
-        username: 'admin',
-        email: 'admin@example.com',
-        password: hashPassword('admin123'),
+        username: 'MS PRODUCTIONS',
+        email: 'info@msproductions.com',
+        password: hashPassword('Msm12345'),
         apiKey: generateToken(),
+        profileImage: 'https://i.imgur.com/c8qwfZf.png',
+        bio: 'المدير العام للنظام',
+        followers: [],
+        following: [],
         createdAt: new Date().toISOString(),
         totalSongs: 0,
         isActive: true,
@@ -142,7 +173,15 @@ if (!db.users.find(u => u.username === 'admin')) {
     };
     db.users.push(admin);
     db.save();
-    console.log('👑 Admin created: admin@example.com / admin123');
+    console.log('👑 Admin created: info@msproductions.com / Msm12345');
+} else {
+    if (existingAdmin.email !== 'info@msproductions.com' || existingAdmin.username !== 'MS PRODUCTIONS') {
+        existingAdmin.email = 'info@msproductions.com';
+        existingAdmin.username = 'MS PRODUCTIONS';
+        existingAdmin.password = hashPassword('Msm12345');
+        db.save();
+        console.log('👑 Admin updated: info@msproductions.com / Msm12345');
+    }
 }
 
 // ============================================================
@@ -166,7 +205,12 @@ app.post('/api/auth/login', (req, res) => {
                 id: user.id,
                 username: user.username,
                 email: user.email,
+                profileImage: user.profileImage || '',
+                bio: user.bio || '',
                 totalSongs: user.totalSongs || 0,
+                followers: user.followers || [],
+                following: user.following || [],
+                role: user.role || 'user',
                 apiKey: token
             }
         });
@@ -188,6 +232,10 @@ app.post('/api/auth/register', (req, res) => {
             email: email.toLowerCase(),
             password: hashPassword(password),
             apiKey: generateToken(),
+            profileImage: 'https://i.imgur.com/c8qwfZf.png',
+            bio: '',
+            followers: [],
+            following: [],
             createdAt: new Date().toISOString(),
             totalSongs: 0,
             isActive: true,
@@ -209,7 +257,18 @@ app.post('/api/auth/register', (req, res) => {
 
 app.get('/api/users/me', authMiddleware, (req, res) => {
     const user = req.user;
-    res.json({ id: user.id, username: user.username, email: user.email, totalSongs: user.totalSongs || 0, createdAt: user.createdAt });
+    res.json({ 
+        id: user.id, 
+        username: user.username, 
+        email: user.email, 
+        profileImage: user.profileImage || '',
+        bio: user.bio || '',
+        followers: user.followers || [],
+        following: user.following || [],
+        totalSongs: user.totalSongs || 0, 
+        createdAt: user.createdAt,
+        role: user.role || 'user'
+    });
 });
 
 app.post('/api/auth/logout', authMiddleware, (req, res) => {
@@ -463,21 +522,218 @@ app.get('/api/shared-songs', (req, res) => {
     }
 });
 
-app.get('/api/users/:userId/songs', (req, res) => {
+// ============================================================
+// نقاط نهاية المستخدمين والملف الشخصي والمتابعة والإشعارات
+// ============================================================
+
+app.get('/api/users/:userId', authMiddleware, (req, res) => {
     try {
-        const userId = req.params.userId;
-        const user = findUserById(userId);
-        if (!user) return res.status(404).json({ error: 'User not found' });
-        const userSongs = db.songs.filter(s => s.userId === userId && s.isShared === true);
-        res.json({ username: user.username, total: userSongs.length, data: userSongs });
+        const targetId = req.params.userId;
+        const targetUser = findUserById(targetId);
+        if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+        const publicSongs = db.songs
+            .filter(s => s.userId === targetId && s.isShared === true && s.audioUrl && s.audioUrl.startsWith('https://'))
+            .map(s => ({
+                id: s.id,
+                title: s.title,
+                style: s.style,
+                audioUrl: s.audioUrl,
+                videoUrl: s.videoUrl,
+                duration: s.duration,
+                imageUrl: s.imageUrl,
+                likes: db.likes.filter(l => l.sharedSongId === s.id).length,
+                comments: db.comments.filter(c => c.sharedSongId === s.id).length,
+                createdAt: s.createdAt
+            }));
+
+        const isFollowing = (targetUser.followers || []).includes(req.user.id);
+
+        res.json({
+            id: targetUser.id,
+            username: targetUser.username,
+            profileImage: targetUser.profileImage || 'https://i.imgur.com/c8qwfZf.png',
+            bio: targetUser.bio || '',
+            role: targetUser.role || 'user',
+            followersCount: (targetUser.followers || []).length,
+            followingCount: (targetUser.following || []).length,
+            totalSongs: targetUser.totalSongs || 0,
+            isFollowing: isFollowing,
+            publicSongs: publicSongs,
+            createdAt: targetUser.createdAt
+        });
     } catch (error) {
-        console.error('Error fetching user songs:', error);
-        res.status(500).json({ error: 'Failed to fetch user songs' });
+        console.error('Error fetching user profile:', error);
+        res.status(500).json({ error: 'Failed to fetch user profile' });
+    }
+});
+
+app.put('/api/users/profile', authMiddleware, (req, res) => {
+    try {
+        const user = req.user;
+        const { email, password, profileImage, bio } = req.body;
+
+        if (email) {
+            const existing = findUserByEmail(email);
+            if (existing && existing.id !== user.id) {
+                return res.status(409).json({ error: 'Email already in use' });
+            }
+            user.email = email.toLowerCase();
+        }
+
+        if (password) {
+            if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+            user.password = hashPassword(password);
+        }
+
+        if (profileImage) user.profileImage = profileImage;
+        if (bio !== undefined) user.bio = bio;
+
+        db.save();
+        db.addAuditLog('profile_updated', user.id, { email: user.email });
+
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                profileImage: user.profileImage,
+                bio: user.bio,
+                role: user.role
+            }
+        });
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        res.status(500).json({ error: 'Failed to update profile' });
+    }
+});
+
+app.post('/api/users/:userId/follow', authMiddleware, (req, res) => {
+    try {
+        const targetId = req.params.userId;
+        if (targetId === req.user.id) {
+            return res.status(400).json({ error: 'You cannot follow yourself' });
+        }
+        const targetUser = findUserById(targetId);
+        if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+        if (!targetUser.followers) targetUser.followers = [];
+        if (targetUser.followers.includes(req.user.id)) {
+            return res.status(400).json({ error: 'Already following' });
+        }
+
+        targetUser.followers.push(req.user.id);
+        if (!req.user.following) req.user.following = [];
+        req.user.following.push(targetId);
+
+        db.save();
+        db.addAuditLog('user_followed', req.user.id, { targetId });
+
+        db.addNotification(targetId, 'follow', `${req.user.username} بدأ بمتابعتك`, {
+            followerId: req.user.id,
+            followerUsername: req.user.username,
+            followerProfileImage: req.user.profileImage
+        });
+
+        res.json({ success: true, message: 'Followed successfully' });
+    } catch (error) {
+        console.error('Error following user:', error);
+        res.status(500).json({ error: 'Failed to follow user' });
+    }
+});
+
+app.delete('/api/users/:userId/follow', authMiddleware, (req, res) => {
+    try {
+        const targetId = req.params.userId;
+        const targetUser = findUserById(targetId);
+        if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+        if (!targetUser.followers) targetUser.followers = [];
+        const index = targetUser.followers.indexOf(req.user.id);
+        if (index === -1) {
+            return res.status(400).json({ error: 'Not following' });
+        }
+        targetUser.followers.splice(index, 1);
+        if (req.user.following) {
+            const idx = req.user.following.indexOf(targetId);
+            if (idx !== -1) req.user.following.splice(idx, 1);
+        }
+
+        db.save();
+        db.addAuditLog('user_unfollowed', req.user.id, { targetId });
+        res.json({ success: true, message: 'Unfollowed successfully' });
+    } catch (error) {
+        console.error('Error unfollowing user:', error);
+        res.status(500).json({ error: 'Failed to unfollow user' });
+    }
+});
+
+app.get('/api/users/:userId/followers', authMiddleware, (req, res) => {
+    try {
+        const targetId = req.params.userId;
+        const targetUser = findUserById(targetId);
+        if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+        const followers = (targetUser.followers || []).map(id => {
+            const u = findUserById(id);
+            return u ? { id: u.id, username: u.username, profileImage: u.profileImage } : null;
+        }).filter(Boolean);
+
+        res.json({ data: followers });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch followers' });
+    }
+});
+
+app.get('/api/users/:userId/following', authMiddleware, (req, res) => {
+    try {
+        const targetId = req.params.userId;
+        const targetUser = findUserById(targetId);
+        if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+        const following = (targetUser.following || []).map(id => {
+            const u = findUserById(id);
+            return u ? { id: u.id, username: u.username, profileImage: u.profileImage } : null;
+        }).filter(Boolean);
+
+        res.json({ data: following });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch following' });
+    }
+});
+
+app.get('/api/notifications', authMiddleware, (req, res) => {
+    try {
+        const userId = req.user.id;
+        const notifs = db.notifications
+            .filter(n => n.userId === userId)
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+            .slice(0, 100);
+
+        const unread = notifs.filter(n => !n.read).length;
+        res.json({ total: notifs.length, unread: unread, data: notifs });
+    } catch (error) {
+        console.error('Error fetching notifications:', error);
+        res.status(500).json({ error: 'Failed to fetch notifications' });
+    }
+});
+
+app.put('/api/notifications/:id/read', authMiddleware, (req, res) => {
+    try {
+        const notifId = req.params.id;
+        const notif = db.notifications.find(n => n.id === notifId && n.userId === req.user.id);
+        if (!notif) return res.status(404).json({ error: 'Notification not found' });
+        notif.read = true;
+        db.save();
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to mark as read' });
     }
 });
 
 // ============================================================
-// الإعجابات والتعليقات
+// الإعجابات والتعليقات (مع إشعارات)
 // ============================================================
 app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
     try {
@@ -492,6 +748,17 @@ app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
         shared.likes = (shared.likes || 0) + 1;
         db.save();
         db.addAuditLog('song_liked', req.user.id, { sharedId });
+
+        const owner = findUserById(shared.userId);
+        if (owner && owner.id !== req.user.id) {
+            db.addNotification(owner.id, 'like', `${req.user.username} أعجب بأغنيتك "${shared.title}"`, {
+                actorId: req.user.id,
+                actorUsername: req.user.username,
+                songId: shared.songId,
+                songTitle: shared.title
+            });
+        }
+
         res.json({ success: true, likes: shared.likes });
     } catch (error) {
         console.error('Error liking song:', error);
@@ -529,6 +796,18 @@ app.post('/api/shared-songs/:sharedId/comments', authMiddleware, (req, res) => {
         shared.commentsCount = (shared.commentsCount || 0) + 1;
         db.save();
         db.addAuditLog('comment_added', req.user.id, { sharedId });
+
+        const owner = findUserById(shared.userId);
+        if (owner && owner.id !== req.user.id) {
+            db.addNotification(owner.id, 'comment', `${req.user.username} علق على أغنيتك "${shared.title}"`, {
+                actorId: req.user.id,
+                actorUsername: req.user.username,
+                songId: shared.songId,
+                songTitle: shared.title,
+                commentText: text.trim()
+            });
+        }
+
         res.json({ success: true, comment, commentsCount: shared.commentsCount });
     } catch (error) {
         console.error('Error adding comment:', error);
@@ -566,13 +845,27 @@ app.delete('/api/comments/:commentId', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// الإحصائيات
+// الإحصائيات المفصلة
 // ============================================================
 app.get('/api/stats', authMiddleware, (req, res) => {
     try {
-        const userSongs = db.songs.filter(s => s.userId === req.user.id);
+        const user = req.user;
+        const userSongs = db.songs.filter(s => s.userId === user.id);
         const total = userSongs.length;
         const sharedCount = userSongs.filter(s => s.isShared).length;
+        const now = new Date();
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - now.getDay());
+        startOfWeek.setHours(0,0,0,0);
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        
+        const songsThisWeek = userSongs.filter(s => new Date(s.createdAt) >= startOfWeek).length;
+        const songsThisMonth = userSongs.filter(s => new Date(s.createdAt) >= startOfMonth).length;
+
+        const userSharedIds = db.sharedSongs.filter(s => s.userId === user.id).map(s => s.id);
+        const totalLikesReceived = db.likes.filter(l => userSharedIds.includes(l.sharedSongId)).length;
+        const totalLikesGiven = db.likes.filter(l => l.userId === user.id).length;
+
         const styleCount = {};
         userSongs.forEach(s => {
             if (s.style) {
@@ -580,15 +873,17 @@ app.get('/api/stats', authMiddleware, (req, res) => {
             }
         });
         const topStyles = Object.entries(styleCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([style, count]) => ({ style, count }));
-        const sharedSongs = db.sharedSongs.filter(s => s.userId === req.user.id);
-        const totalLikes = sharedSongs.reduce((sum, s) => sum + (s.likes || 0), 0);
-        const totalComments = sharedSongs.reduce((sum, s) => sum + (s.commentsCount || 0), 0);
+
         res.json({
             totalSongs: total,
             sharedSongs: sharedCount,
+            followers: (user.followers || []).length,
+            following: (user.following || []).length,
+            totalLikesReceived: totalLikesReceived,
+            totalLikesGiven: totalLikesGiven,
+            songsThisWeek: songsThisWeek,
+            songsThisMonth: songsThisMonth,
             topStyles,
-            totalLikes,
-            totalComments,
             averageDuration: userSongs.filter(s => s.duration).reduce((sum, s) => sum + (s.duration || 0), 0) / (userSongs.filter(s => s.duration).length || 1)
         });
     } catch (error) {
@@ -807,14 +1102,34 @@ app.get('/healthz', (req, res) => {
 // ============================================================
 app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
+    console.log(`👑 Admin: info@msproductions.com / Msm12345`);
     console.log(`📋 Endpoints:`);
     console.log(`   🔐 POST /api/auth/login`);
     console.log(`   ✨ POST /api/auth/register`);
     console.log(`   👤 GET  /api/users/me`);
+    console.log(`   📋 GET  /api/users/:userId (profile)`);
+    console.log(`   ✏️ PUT  /api/users/profile (update profile)`);
+    console.log(`   👥 POST /api/users/:userId/follow`);
+    console.log(`   👥 DELETE /api/users/:userId/follow`);
+    console.log(`   📋 GET  /api/users/:userId/followers`);
+    console.log(`   📋 GET  /api/users/:userId/following`);
+    console.log(`   🔔 GET  /api/notifications`);
+    console.log(`   🔔 PUT  /api/notifications/:id/read`);
     console.log(`   🎵 GET  /api/songs (auth required)`);
+    console.log(`   🎵 POST /api/songs`);
+    console.log(`   🎵 DELETE /api/songs/:songId`);
+    console.log(`   🎵 PUT  /api/songs/:songId`);
+    console.log(`   📤 POST /api/songs/:songId/share`);
+    console.log(`   📤 DELETE /api/songs/:songId/share`);
+    console.log(`   🌐 GET  /api/shared-songs`);
+    console.log(`   ❤️ POST /api/shared-songs/:sharedId/like`);
+    console.log(`   ❤️ DELETE /api/shared-songs/:sharedId/like`);
+    console.log(`   💬 POST /api/shared-songs/:sharedId/comments`);
+    console.log(`   💬 GET  /api/shared-songs/:sharedId/comments`);
+    console.log(`   💬 DELETE /api/comments/:commentId`);
+    console.log(`   📊 GET  /api/stats`);
     console.log(`   📨 POST /webhook (Suno callback)`);
     console.log(`   🔄 POST /api/proxy/suno/* (proxy to Suno API)`);
     console.log(`   🔄 GET  /api/proxy/suno/* (proxy GET to Suno API)`);
     console.log(`   🏠 GET  /healthz`);
-    console.log(`👑 Admin: admin@example.com / admin123`);
 });

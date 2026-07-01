@@ -3,14 +3,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { google } = require('googleapis');
-
-// محاولة تحميل متغيرات البيئة من ملف .env (للاستخدام المحلي)
-try {
-    require('dotenv').config();
-} catch (e) {
-    // تجاهل إذا لم يكن dotenv مثبتاً
-}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -88,10 +80,6 @@ class Database {
         try {
             fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(this.data, null, 2));
             console.log('💾 تم حفظ البيانات');
-            // بعد الحفظ، نقوم بالنسخ الاحتياطي
-            if (typeof createBackup === 'function') {
-                createBackup();
-            }
         } catch (e) { 
             console.error('❌ خطأ في حفظ البيانات:', e.message); 
         }
@@ -226,187 +214,6 @@ if (!existingAdmin) {
         console.log('👑 Admin updated: info@msproductions.com / Msm12345');
     }
 }
-
-// ============================================================
-// Google Drive Backup - الإعدادات والوظائف
-// ============================================================
-
-// تحميل بيانات الاعتماد من متغير البيئة
-let googleAuth = null;
-let driveService = null;
-const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-
-console.log('🔍 [ENV] GOOGLE_DRIVE_CREDENTIALS:', process.env.GOOGLE_DRIVE_CREDENTIALS ? '✅ موجود (طول: ' + process.env.GOOGLE_DRIVE_CREDENTIALS.length + ' حرف)' : '❌ غير موجود');
-console.log('🔍 [ENV] GOOGLE_DRIVE_FOLDER_ID:', GOOGLE_DRIVE_FOLDER_ID || '❌ غير موجود');
-
-if (process.env.GOOGLE_DRIVE_CREDENTIALS) {
-    try {
-        // تنظيف القيمة من أي مسافات أو فواصل إضافية
-        let credsRaw = process.env.GOOGLE_DRIVE_CREDENTIALS.trim();
-        const credentials = JSON.parse(credsRaw);
-        console.log('✅ تم تحميل بيانات الاعتماد بنجاح');
-        googleAuth = new google.auth.GoogleAuth({
-            credentials: credentials,
-            scopes: ['https://www.googleapis.com/auth/drive.file']
-        });
-        driveService = google.drive({ version: 'v3', auth: googleAuth });
-        console.log('✅ تم تفعيل Google Drive Backup');
-    } catch (error) {
-        console.error('❌ فشل تحميل بيانات اعتماد Google Drive:', error.message);
-        console.error('❌ تأكد من أن قيمة GOOGLE_DRIVE_CREDENTIALS هي JSON صحيح');
-        console.error('❌ القيمة الحالية تبدأ بـ:', process.env.GOOGLE_DRIVE_CREDENTIALS.substring(0, 50) + '...');
-    }
-} else {
-    console.warn('⚠️ GOOGLE_DRIVE_CREDENTIALS غير موجودة، لن يتم رفع النسخ الاحتياطية إلى Google Drive');
-}
-
-// دالة رفع الملف إلى Google Drive
-async function uploadToGoogleDrive(filePath, fileName) {
-    if (!driveService || !GOOGLE_DRIVE_FOLDER_ID) {
-        console.warn('⚠️ Google Drive غير مفعّل، تخطي الرفع');
-        return false;
-    }
-    try {
-        const fileMetadata = {
-            name: fileName || path.basename(filePath),
-            parents: [GOOGLE_DRIVE_FOLDER_ID]
-        };
-        const media = {
-            mimeType: 'application/json',
-            body: fs.createReadStream(filePath)
-        };
-        const response = await driveService.files.create({
-            resource: fileMetadata,
-            media: media,
-            fields: 'id, name, webViewLink'
-        });
-        console.log(`✅ تم رفع النسخة الاحتياطية إلى Google Drive: ${response.data.name} (ID: ${response.data.id})`);
-        return response.data;
-    } catch (error) {
-        console.error('❌ فشل رفع النسخة إلى Google Drive:', error.message);
-        if (error.message.includes('permission')) {
-            console.error('❌ تحقق من أن حساب الخدمة لديه صلاحية الكتابة على المجلد المشترك');
-        }
-        return false;
-    }
-}
-
-// دالة إنشاء نسخة احتياطية محلية + رفع إلى Google Drive
-function createBackup() {
-    try {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const backupDir = path.join(__dirname, 'backups');
-        if (!fs.existsSync(backupDir)) {
-            fs.mkdirSync(backupDir, { recursive: true });
-        }
-        const backupFile = path.join(backupDir, `data_${timestamp}.json`);
-        const currentData = fs.readFileSync(CONFIG.DATA_FILE, 'utf8');
-        fs.writeFileSync(backupFile, currentData);
-        console.log(`✅ نسخة احتياطية محلية: ${backupFile}`);
-        
-        // رفع إلى Google Drive (إذا كان مفعّلاً)
-        if (driveService && GOOGLE_DRIVE_FOLDER_ID) {
-            uploadToGoogleDrive(backupFile, `data_${timestamp}.json`).catch(console.error);
-        }
-        
-        // تنظيف النسخ المحلية القديمة (احتفظ بآخر 20)
-        const files = fs.readdirSync(backupDir)
-            .filter(f => f.startsWith('data_') && f.endsWith('.json'))
-            .sort();
-        if (files.length > 20) {
-            const toDelete = files.slice(0, files.length - 20);
-            toDelete.forEach(f => {
-                fs.unlinkSync(path.join(backupDir, f));
-                console.log(`🗑️ تم حذف نسخة محلية قديمة: ${f}`);
-            });
-        }
-        return backupFile;
-    } catch (error) {
-        console.error('❌ فشل إنشاء النسخة الاحتياطية:', error);
-        return null;
-    }
-}
-
-// ============================================================
-// نقاط نهاية النسخ الاحتياطي (للمدير فقط)
-// ============================================================
-
-// قائمة النسخ الاحتياطية على Google Drive
-app.get('/api/backup/drive-list', authMiddleware, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'غير مصرح لك' });
-    }
-    if (!driveService || !GOOGLE_DRIVE_FOLDER_ID) {
-        return res.status(503).json({ error: 'Google Drive غير مفعّل' });
-    }
-    try {
-        const response = await driveService.files.list({
-            q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType='application/json'`,
-            fields: 'files(id, name, createdTime, size)',
-            orderBy: 'createdTime desc'
-        });
-        res.json({ data: response.data.files });
-    } catch (error) {
-        console.error('Error listing drive files:', error);
-        res.status(500).json({ error: 'فشل جلب القائمة من Google Drive' });
-    }
-});
-
-// تحميل نسخة احتياطية محددة من Google Drive
-app.get('/api/backup/drive-download/:fileId', authMiddleware, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'غير مصرح لك' });
-    }
-    if (!driveService) {
-        return res.status(503).json({ error: 'Google Drive غير مفعّل' });
-    }
-    try {
-        const fileId = req.params.fileId;
-        const response = await driveService.files.get({
-            fileId: fileId,
-            alt: 'media'
-        }, { responseType: 'stream' });
-        res.setHeader('Content-Disposition', `attachment; filename="backup_${fileId}.json"`);
-        response.data.pipe(res);
-    } catch (error) {
-        console.error('Error downloading file from drive:', error);
-        res.status(500).json({ error: 'فشل تحميل الملف من Google Drive' });
-    }
-});
-
-// نقطة نهاية لإنشاء نسخة احتياطية فورية (يدوياً)
-app.post('/api/backup/manual', authMiddleware, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'غير مصرح لك' });
-    }
-    const backupFile = createBackup();
-    if (backupFile) {
-        res.json({ success: true, file: backupFile });
-    } else {
-        res.status(500).json({ error: 'فشل إنشاء النسخة الاحتياطية' });
-    }
-});
-
-// تحميل أحدث نسخة محلية
-app.get('/api/backup/latest-local', authMiddleware, (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'غير مصرح لك' });
-    }
-    try {
-        const backupDir = path.join(__dirname, 'backups');
-        const files = fs.readdirSync(backupDir)
-            .filter(f => f.startsWith('data_') && f.endsWith('.json'))
-            .sort();
-        if (files.length === 0) {
-            return res.status(404).json({ error: 'لا توجد نسخ احتياطية محلية' });
-        }
-        const latest = files[files.length - 1];
-        const filePath = path.join(backupDir, latest);
-        res.download(filePath, `backup_${latest}`);
-    } catch (error) {
-        res.status(500).json({ error: 'فشل تحميل النسخة الاحتياطية' });
-    }
-});
 
 // ============================================================
 // نقاط نهاية المصادقة
@@ -1429,9 +1236,4 @@ app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`👑 Admin: info@msproductions.com / Msm12345`);
     console.log(`📋 Endpoints ready.`);
-    if (driveService && GOOGLE_DRIVE_FOLDER_ID) {
-        console.log(`✅ Google Drive Backup active. Folder ID: ${GOOGLE_DRIVE_FOLDER_ID}`);
-    } else {
-        console.warn(`⚠️ Google Drive Backup not configured. Set GOOGLE_DRIVE_CREDENTIALS and GOOGLE_DRIVE_FOLDER_ID`);
-    }
 });

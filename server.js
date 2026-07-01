@@ -5,6 +5,39 @@ const path = require('path');
 const crypto = require('crypto');
 const { google } = require('googleapis');
 
+// ===== حل مشكلة Premature close مع Google APIs =====
+// نجبر google-auth-library على استخدام fetch المدمج في Node.js
+// بدلاً من node-fetch القديم
+try {
+    const gaxios = require('gaxios');
+    // استبدال دالة الطلب الافتراضية في gaxios
+    const originalRequest = gaxios.Gaxios.prototype.request;
+    gaxios.Gaxios.prototype.request = async function (opts) {
+        // إذا كان الطلب موجهاً لـ Google OAuth، نستخدم fetch المدمج
+        if (opts.url && opts.url.includes('googleapis.com/oauth2')) {
+            const fetch = global.fetch; // fetch المدمج في Node.js
+            const response = await fetch(opts.url, {
+                method: opts.method || 'POST',
+                headers: opts.headers || {},
+                body: opts.data ? JSON.stringify(opts.data) : undefined,
+            });
+            const data = await response.json();
+            return {
+                data: data,
+                status: response.status,
+                statusText: response.statusText,
+                headers: response.headers,
+                config: opts,
+            };
+        }
+        // للطلبات الأخرى، نستخدم الطريقة الأصلية
+        return originalRequest.call(this, opts);
+    };
+    console.log('✅ تم تفعيل إصلاح Premature close لـ Google APIs');
+} catch (error) {
+    console.warn('⚠️ فشل تفعيل إصلاح Google APIs:', error.message);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 

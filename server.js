@@ -3,6 +3,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -64,7 +65,7 @@ class Database {
             likes: [], 
             auditLogs: [],
             notifications: [],
-            messages: [] // <--- جديد: جدول الرسائل
+            messages: []
         };
         this.load();
     }
@@ -79,7 +80,14 @@ class Database {
     save() {
         try {
             fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(this.data, null, 2));
-        } catch (e) { console.error('❌ خطأ في حفظ البيانات:', e.message); }
+            console.log('💾 تم حفظ البيانات');
+            // بعد الحفظ، نقوم بالنسخ الاحتياطي (إذا كانت الميزة مفعّلة)
+            if (typeof createBackup === 'function') {
+                createBackup();
+            }
+        } catch (e) { 
+            console.error('❌ خطأ في حفظ البيانات:', e.message); 
+        }
     }
     get users() { return this.data.users; }
     set users(v) { this.data.users = v; this.save(); }
@@ -95,7 +103,7 @@ class Database {
     set auditLogs(v) { this.data.auditLogs = v; this.save(); }
     get notifications() { return this.data.notifications; }
     set notifications(v) { this.data.notifications = v; this.save(); }
-    get messages() { return this.data.messages; } // <--- جديد
+    get messages() { return this.data.messages; }
     set messages(v) { this.data.messages = v; this.save(); }
     
     addAuditLog(action, userId, details) {
@@ -213,7 +221,177 @@ if (!existingAdmin) {
 }
 
 // ============================================================
-// نقاط نهاية المصادقة (موجودة)
+// Google Drive Backup - الإعدادات والوظائف
+// ============================================================
+
+// تحميل بيانات الاعتماد من متغير البيئة
+let googleAuth = null;
+let driveService = null;
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+if (process.env.GOOGLE_DRIVE_CREDENTIALS) {
+    try {
+        const credentials = JSON.parse(process.env.GOOGLE_DRIVE_CREDENTIALS);
+        googleAuth = new google.auth.GoogleAuth({
+            credentials: credentials,
+            scopes: ['https://www.googleapis.com/auth/drive.file']
+        });
+        driveService = google.drive({ version: 'v3', auth: googleAuth });
+        console.log('✅ تم تفعيل Google Drive Backup');
+    } catch (error) {
+        console.error('❌ فشل تحميل بيانات اعتماد Google Drive:', error.message);
+    }
+} else {
+    console.warn('⚠️ GOOGLE_DRIVE_CREDENTIALS غير موجودة، لن يتم رفع النسخ الاحتياطية إلى Google Drive');
+}
+
+// دالة رفع الملف إلى Google Drive
+async function uploadToGoogleDrive(filePath, fileName) {
+    if (!driveService || !GOOGLE_DRIVE_FOLDER_ID) {
+        console.warn('⚠️ Google Drive غير مفعّل، تخطي الرفع');
+        return false;
+    }
+    try {
+        const fileMetadata = {
+            name: fileName || path.basename(filePath),
+            parents: [GOOGLE_DRIVE_FOLDER_ID]
+        };
+        const media = {
+            mimeType: 'application/json',
+            body: fs.createReadStream(filePath)
+        };
+        const response = await driveService.files.create({
+            resource: fileMetadata,
+            media: media,
+            fields: 'id, name, webViewLink'
+        });
+        console.log(`✅ تم رفع النسخة الاحتياطية إلى Google Drive: ${response.data.name} (ID: ${response.data.id})`);
+        return response.data;
+    } catch (error) {
+        console.error('❌ فشل رفع النسخة إلى Google Drive:', error.message);
+        return false;
+    }
+}
+
+// دالة إنشاء نسخة احتياطية محلية + رفع إلى Google Drive
+function createBackup() {
+    try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupDir = path.join(__dirname, 'backups');
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+        const backupFile = path.join(backupDir, `data_${timestamp}.json`);
+        const currentData = fs.readFileSync(CONFIG.DATA_FILE, 'utf8');
+        fs.writeFileSync(backupFile, currentData);
+        console.log(`✅ نسخة احتياطية محلية: ${backupFile}`);
+        
+        // رفع إلى Google Drive (إذا كان مفعّلاً)
+        if (driveService && GOOGLE_DRIVE_FOLDER_ID) {
+            uploadToGoogleDrive(backupFile, `data_${timestamp}.json`).catch(console.error);
+        }
+        
+        // تنظيف النسخ المحلية القديمة (احتفظ بآخر 20)
+        const files = fs.readdirSync(backupDir)
+            .filter(f => f.startsWith('data_') && f.endsWith('.json'))
+            .sort();
+        if (files.length > 20) {
+            const toDelete = files.slice(0, files.length - 20);
+            toDelete.forEach(f => {
+                fs.unlinkSync(path.join(backupDir, f));
+                console.log(`🗑️ تم حذف نسخة محلية قديمة: ${f}`);
+            });
+        }
+        return backupFile;
+    } catch (error) {
+        console.error('❌ فشل إنشاء النسخة الاحتياطية:', error);
+        return null;
+    }
+}
+
+// ============================================================
+// نقاط نهاية النسخ الاحتياطي (للمدير فقط)
+// ============================================================
+
+// قائمة النسخ الاحتياطية على Google Drive
+app.get('/api/backup/drive-list', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'غير مصرح لك' });
+    }
+    if (!driveService || !GOOGLE_DRIVE_FOLDER_ID) {
+        return res.status(503).json({ error: 'Google Drive غير مفعّل' });
+    }
+    try {
+        const response = await driveService.files.list({
+            q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and mimeType='application/json'`,
+            fields: 'files(id, name, createdTime, size)',
+            orderBy: 'createdTime desc'
+        });
+        res.json({ data: response.data.files });
+    } catch (error) {
+        console.error('Error listing drive files:', error);
+        res.status(500).json({ error: 'فشل جلب القائمة من Google Drive' });
+    }
+});
+
+// تحميل نسخة احتياطية محددة من Google Drive
+app.get('/api/backup/drive-download/:fileId', authMiddleware, async (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'غير مصرح لك' });
+    }
+    if (!driveService) {
+        return res.status(503).json({ error: 'Google Drive غير مفعّل' });
+    }
+    try {
+        const fileId = req.params.fileId;
+        const response = await driveService.files.get({
+            fileId: fileId,
+            alt: 'media'
+        }, { responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="backup_${fileId}.json"`);
+        response.data.pipe(res);
+    } catch (error) {
+        console.error('Error downloading file from drive:', error);
+        res.status(500).json({ error: 'فشل تحميل الملف من Google Drive' });
+    }
+});
+
+// نقطة نهاية لإنشاء نسخة احتياطية فورية (يدوياً)
+app.post('/api/backup/manual', authMiddleware, (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'غير مصرح لك' });
+    }
+    const backupFile = createBackup();
+    if (backupFile) {
+        res.json({ success: true, file: backupFile });
+    } else {
+        res.status(500).json({ error: 'فشل إنشاء النسخة الاحتياطية' });
+    }
+});
+
+// تحميل أحدث نسخة محلية
+app.get('/api/backup/latest-local', authMiddleware, (req, res) => {
+    if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'غير مصرح لك' });
+    }
+    try {
+        const backupDir = path.join(__dirname, 'backups');
+        const files = fs.readdirSync(backupDir)
+            .filter(f => f.startsWith('data_') && f.endsWith('.json'))
+            .sort();
+        if (files.length === 0) {
+            return res.status(404).json({ error: 'لا توجد نسخ احتياطية محلية' });
+        }
+        const latest = files[files.length - 1];
+        const filePath = path.join(backupDir, latest);
+        res.download(filePath, `backup_${latest}`);
+    } catch (error) {
+        res.status(500).json({ error: 'فشل تحميل النسخة الاحتياطية' });
+    }
+});
+
+// ============================================================
+// نقاط نهاية المصادقة
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
     try {
@@ -312,7 +490,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني (موجودة)
+// نقاط نهاية الأغاني
 // ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
@@ -469,7 +647,7 @@ app.post('/api/songs/:songId/share', authMiddleware, (req, res) => {
             songId: song.id,
             userId: req.user.id,
             username: req.user.username,
-            profileImage: req.user.profileImage || 'https://i.imgur.com/c8qwfZf.png', // <--- إضافة الصورة
+            profileImage: req.user.profileImage || 'https://i.imgur.com/c8qwfZf.png',
             title: song.title,
             style: song.style,
             audioUrl: song.audioUrl,
@@ -514,19 +692,13 @@ app.delete('/api/songs/:songId/share', authMiddleware, (req, res) => {
 app.get('/api/shared-songs', authMiddleware, (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 50;
-        const filter = req.query.filter || 'all'; // 'all' أو 'following'
+        const filter = req.query.filter || 'all';
         let shared = db.sharedSongs;
-        
-        // فلتر المتابَعون
         if (filter === 'following') {
             const followingIds = req.user.following || [];
             shared = shared.filter(s => followingIds.includes(s.userId));
         }
-        
-        shared = shared
-            .sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt))
-            .slice(0, limit);
-            
+        shared = shared.sort((a, b) => new Date(b.sharedAt) - new Date(a.sharedAt)).slice(0, limit);
         const result = shared.map(s => {
             const likes = db.likes.filter(l => l.sharedSongId === s.id).length;
             const comments = db.comments.filter(c => c.sharedSongId === s.id).length;
@@ -721,7 +893,7 @@ app.get('/api/users/:userId/following', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// البحث عن المستخدمين (جديد)
+// البحث عن المستخدمين
 // ============================================================
 app.get('/api/users/search', authMiddleware, (req, res) => {
     try {
@@ -751,7 +923,7 @@ app.get('/api/users/search', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية المراسلة (جديد)
+// نقاط نهاية المراسلة
 // ============================================================
 app.get('/api/messages/:userId', authMiddleware, (req, res) => {
     try {
@@ -775,7 +947,6 @@ app.post('/api/messages/:userId', authMiddleware, (req, res) => {
         if (!toUser) return res.status(404).json({ error: 'المستخدم غير موجود' });
         
         const msg = db.addMessage(req.user.id, toUserId, text.trim());
-        // إشعار للمستخدم المستقبل
         db.addNotification(toUserId, 'message', `${req.user.username} أرسل لك رسالة`, {
             fromUserId: req.user.id,
             fromUsername: req.user.username,
@@ -811,7 +982,7 @@ app.put('/api/messages/read', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// الإعجابات والتعليقات (مع إشعارات) - موجودة
+// الإعجابات والتعليقات
 // ============================================================
 app.post('/api/shared-songs/:sharedId/like', authMiddleware, (req, res) => {
     try {
@@ -952,7 +1123,6 @@ app.get('/api/stats', authMiddleware, (req, res) => {
         });
         const topStyles = Object.entries(styleCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([style, count]) => ({ style, count }));
 
-        // عدد الرسائل غير المقروءة
         const unreadMessages = db.getUnreadMessages(user.id).length;
 
         res.json({
@@ -966,7 +1136,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
             songsThisMonth: songsThisMonth,
             topStyles,
             averageDuration: userSongs.filter(s => s.duration).reduce((sum, s) => sum + (s.duration || 0), 0) / (userSongs.filter(s => s.duration).length || 1),
-            unreadMessages: unreadMessages // <--- جديد
+            unreadMessages: unreadMessages
         });
     } catch (error) {
         console.error('Error fetching stats:', error);
@@ -975,7 +1145,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// Webhook الرئيسي (موجود)
+// Webhook الرئيسي (معدل لدعم جميع الحقول)
 // ============================================================
 app.post('/webhook', (req, res) => {
     console.log('📨 [WEBHOOK] تم استقبال طلب في', new Date().toISOString());
@@ -1008,11 +1178,21 @@ app.post('/webhook', (req, res) => {
         let updatedCount = 0;
 
         clips.forEach((clip, index) => {
+            // استخراج جميع الحقول الممكنة
             const audioUrl = clip.audio_url || clip.audioUrl || clip.url || null;
             const videoUrl = clip.video_url || clip.videoUrl || null;
+            const wavUrl = clip.wav_url || clip.wavUrl || null;
+            const midiUrl = clip.midi_url || clip.midiUrl || null;
+            const instrumentalUrl = clip.instrumental_url || clip.instrumentalUrl || null;
+            const vocalsUrl = clip.vocals_url || clip.vocalsUrl || null;
+            const lyrics = clip.lyrics || null;
             const title = clip.title || clip.name || `مقطع ${index + 1}`;
             const audioId = clip.id || clip.audioId || `clip-${index}`;
             const clipTaskId = clip.task_id || clip.taskId || taskId || `unknown-${Date.now()}`;
+            const duration = clip.duration || null;
+            const imageUrl = clip.image_url || clip.imageUrl || null;
+            const style = clip.tags || clip.style || '';
+            const prompt = clip.prompt || '';
 
             const existingSong = db.songs.find(s => s.taskId === clipTaskId && s.audioId === audioId);
 
@@ -1028,11 +1208,54 @@ app.post('/webhook', (req, res) => {
                     existingSong.videoUrl = videoUrl;
                     updated = true;
                 }
+                if (wavUrl && !existingSong.wavUrl) {
+                    existingSong.wavUrl = wavUrl;
+                    updated = true;
+                }
+                if (midiUrl && !existingSong.midiUrl) {
+                    existingSong.midiUrl = midiUrl;
+                    updated = true;
+                }
+                if (instrumentalUrl && !existingSong.instrumentalUrl) {
+                    existingSong.instrumentalUrl = instrumentalUrl;
+                    updated = true;
+                }
+                if (vocalsUrl && !existingSong.vocalsUrl) {
+                    existingSong.vocalsUrl = vocalsUrl;
+                    updated = true;
+                }
+                if (lyrics && !existingSong.lyrics) {
+                    existingSong.lyrics = lyrics;
+                    updated = true;
+                }
+                if (duration && !existingSong.duration) {
+                    existingSong.duration = duration;
+                    updated = true;
+                }
+                if (imageUrl && !existingSong.imageUrl) {
+                    existingSong.imageUrl = imageUrl;
+                    updated = true;
+                }
+                if (title && !existingSong.title) {
+                    existingSong.title = title;
+                    updated = true;
+                }
+                if (style && !existingSong.style) {
+                    existingSong.style = style;
+                    updated = true;
+                }
+                if (prompt && !existingSong.prompt) {
+                    existingSong.prompt = prompt;
+                    updated = true;
+                }
+
                 if (updated) {
                     existingSong.updatedAt = new Date().toISOString();
                     updatedCount++;
+                    console.log(`✅ تم تحديث الأغنية: ${existingSong.title} (${existingSong.id})`);
                 }
             } else {
+                // إنشاء أغنية جديدة مع جميع الحقول
                 const song = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                     userId: userId,
@@ -1040,11 +1263,11 @@ app.post('/webhook', (req, res) => {
                     audioId: audioId,
                     audioUrl: audioUrl,
                     downloadUrl: audioUrl || null,
-                    imageUrl: clip.image_url || clip.imageUrl || null,
+                    imageUrl: imageUrl || null,
                     title: title,
-                    style: clip.tags || clip.style || '',
-                    prompt: clip.prompt || '',
-                    duration: clip.duration || null,
+                    style: style || '',
+                    prompt: prompt || '',
+                    duration: duration || null,
                     videoUrl: videoUrl,
                     status: audioUrl ? 'success' : 'pending',
                     isShared: false,
@@ -1052,11 +1275,11 @@ app.post('/webhook', (req, res) => {
                     commentsCount: 0,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
-                    lyrics: clip.lyrics || null,
-                    instrumentalUrl: clip.instrumental_url || clip.instrumentalUrl || null,
-                    vocalsUrl: clip.vocals_url || clip.vocalsUrl || null,
-                    wavUrl: clip.wav_url || clip.wavUrl || null,
-                    midiUrl: clip.midi_url || clip.midiUrl || null
+                    lyrics: lyrics,
+                    instrumentalUrl: instrumentalUrl,
+                    vocalsUrl: vocalsUrl,
+                    wavUrl: wavUrl,
+                    midiUrl: midiUrl
                 };
                 db.songs.push(song);
                 savedCount++;
@@ -1064,10 +1287,12 @@ app.post('/webhook', (req, res) => {
                     const user = findUserById(userId);
                     if (user) user.totalSongs = (user.totalSongs || 0) + 1;
                 }
+                console.log(`✅ تم إنشاء أغنية جديدة: ${song.title} (${song.id})`);
             }
         });
 
         db.save();
+        console.log(`📨 [WEBHOOK] تم حفظ ${savedCount} أغنية جديدة وتحديث ${updatedCount} أغنية`);
         return res.status(200).json({ received: true, saved: savedCount, updated: updatedCount });
 
     } catch (error) {
@@ -1077,7 +1302,7 @@ app.post('/webhook', (req, res) => {
 });
 
 // ============================================================
-// Proxy لـ Suno API (موجود)
+// Proxy لـ Suno API
 // ============================================================
 app.post('/api/proxy/suno/*', authMiddleware, async (req, res) => {
     try {
@@ -1186,4 +1411,9 @@ app.listen(PORT, () => {
     console.log(`✅ Server running on port ${PORT}`);
     console.log(`👑 Admin: info@msproductions.com / Msm12345`);
     console.log(`📋 Endpoints ready.`);
+    if (driveService && GOOGLE_DRIVE_FOLDER_ID) {
+        console.log(`✅ Google Drive Backup active. Folder ID: ${GOOGLE_DRIVE_FOLDER_ID}`);
+    } else {
+        console.warn(`⚠️ Google Drive Backup not configured. Set GOOGLE_DRIVE_CREDENTIALS and GOOGLE_DRIVE_FOLDER_ID`);
+    }
 });

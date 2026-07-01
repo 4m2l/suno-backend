@@ -152,7 +152,7 @@ function authMiddleware(req, res, next) {
 }
 
 // ============================================================
-// إنشاء Admin (حساب المدير)
+// إنشاء Admin (حساب المدير الجديد)
 // ============================================================
 const existingAdmin = db.users.find(u => u.role === 'admin');
 if (!existingAdmin) {

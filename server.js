@@ -55,6 +55,95 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 
 // ============================================================
+// Google Drive Backup - الإعدادات والوظائف (تعريف مبكر)
+// ============================================================
+
+// تحميل بيانات الاعتماد من متغير البيئة
+let googleAuth = null;
+let driveService = null;
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
+
+if (process.env.GOOGLE_DRIVE_CREDENTIALS) {
+    try {
+        const credentials = JSON.parse(process.env.GOOGLE_DRIVE_CREDENTIALS);
+        googleAuth = new google.auth.GoogleAuth({
+            credentials: credentials,
+            scopes: ['https://www.googleapis.com/auth/drive.file']
+        });
+        driveService = google.drive({ version: 'v3', auth: googleAuth });
+        console.log('✅ تم تفعيل Google Drive Backup');
+    } catch (error) {
+        console.error('❌ فشل تحميل بيانات اعتماد Google Drive:', error.message);
+    }
+} else {
+    console.warn('⚠️ GOOGLE_DRIVE_CREDENTIALS غير موجودة، لن يتم رفع النسخ الاحتياطية إلى Google Drive');
+}
+
+// دالة رفع الملف إلى Google Drive
+async function uploadToGoogleDrive(filePath, fileName) {
+    if (!driveService || !GOOGLE_DRIVE_FOLDER_ID) {
+        console.warn('⚠️ Google Drive غير مفعّل، تخطي الرفع');
+        return false;
+    }
+    try {
+        const fileMetadata = {
+            name: fileName || path.basename(filePath),
+            parents: [GOOGLE_DRIVE_FOLDER_ID]
+        };
+        const media = {
+            mimeType: 'application/json',
+            body: fs.createReadStream(filePath)
+        };
+        const response = await driveService.files.create({
+            resource: fileMetadata,
+            media: media,
+            fields: 'id, name, webViewLink'
+        });
+        console.log(`✅ تم رفع النسخة الاحتياطية إلى Google Drive: ${response.data.name} (ID: ${response.data.id})`);
+        return response.data;
+    } catch (error) {
+        console.error('❌ فشل رفع النسخة إلى Google Drive:', error.message);
+        return false;
+    }
+}
+
+// دالة إنشاء نسخة احتياطية محلية + رفع إلى Google Drive
+function createBackup() {
+    try {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupDir = path.join(__dirname, 'backups');
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+        const backupFile = path.join(backupDir, `data_${timestamp}.json`);
+        const currentData = fs.readFileSync(CONFIG.DATA_FILE, 'utf8');
+        fs.writeFileSync(backupFile, currentData);
+        console.log(`✅ نسخة احتياطية محلية: ${backupFile}`);
+        
+        // رفع إلى Google Drive (إذا كان مفعّلاً)
+        if (driveService && GOOGLE_DRIVE_FOLDER_ID) {
+            uploadToGoogleDrive(backupFile, `data_${timestamp}.json`).catch(console.error);
+        }
+        
+        // تنظيف النسخ المحلية القديمة (احتفظ بآخر 20)
+        const files = fs.readdirSync(backupDir)
+            .filter(f => f.startsWith('data_') && f.endsWith('.json'))
+            .sort();
+        if (files.length > 20) {
+            const toDelete = files.slice(0, files.length - 20);
+            toDelete.forEach(f => {
+                fs.unlinkSync(path.join(backupDir, f));
+                console.log(`🗑️ تم حذف نسخة محلية قديمة: ${f}`);
+            });
+        }
+        return backupFile;
+    } catch (error) {
+        console.error('❌ فشل إنشاء النسخة الاحتياطية:', error);
+        return null;
+    }
+}
+
+// ============================================================
 // قاعدة البيانات
 // ============================================================
 const CONFIG = {
@@ -228,95 +317,6 @@ if (!existingAdmin) {
 }
 
 // ============================================================
-// Google Drive Backup - الإعدادات والوظائف
-// ============================================================
-
-// تحميل بيانات الاعتماد من متغير البيئة
-let googleAuth = null;
-let driveService = null;
-const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-
-if (process.env.GOOGLE_DRIVE_CREDENTIALS) {
-    try {
-        const credentials = JSON.parse(process.env.GOOGLE_DRIVE_CREDENTIALS);
-        googleAuth = new google.auth.GoogleAuth({
-            credentials: credentials,
-            scopes: ['https://www.googleapis.com/auth/drive.file']
-        });
-        driveService = google.drive({ version: 'v3', auth: googleAuth });
-        console.log('✅ تم تفعيل Google Drive Backup');
-    } catch (error) {
-        console.error('❌ فشل تحميل بيانات اعتماد Google Drive:', error.message);
-    }
-} else {
-    console.warn('⚠️ GOOGLE_DRIVE_CREDENTIALS غير موجودة، لن يتم رفع النسخ الاحتياطية إلى Google Drive');
-}
-
-// دالة رفع الملف إلى Google Drive
-async function uploadToGoogleDrive(filePath, fileName) {
-    if (!driveService || !GOOGLE_DRIVE_FOLDER_ID) {
-        console.warn('⚠️ Google Drive غير مفعّل، تخطي الرفع');
-        return false;
-    }
-    try {
-        const fileMetadata = {
-            name: fileName || path.basename(filePath),
-            parents: [GOOGLE_DRIVE_FOLDER_ID]
-        };
-        const media = {
-            mimeType: 'application/json',
-            body: fs.createReadStream(filePath)
-        };
-        const response = await driveService.files.create({
-            resource: fileMetadata,
-            media: media,
-            fields: 'id, name, webViewLink'
-        });
-        console.log(`✅ تم رفع النسخة الاحتياطية إلى Google Drive: ${response.data.name} (ID: ${response.data.id})`);
-        return response.data;
-    } catch (error) {
-        console.error('❌ فشل رفع النسخة إلى Google Drive:', error.message);
-        return false;
-    }
-}
-
-// دالة إنشاء نسخة احتياطية محلية + رفع إلى Google Drive
-function createBackup() {
-    try {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const backupDir = path.join(__dirname, 'backups');
-        if (!fs.existsSync(backupDir)) {
-            fs.mkdirSync(backupDir, { recursive: true });
-        }
-        const backupFile = path.join(backupDir, `data_${timestamp}.json`);
-        const currentData = fs.readFileSync(CONFIG.DATA_FILE, 'utf8');
-        fs.writeFileSync(backupFile, currentData);
-        console.log(`✅ نسخة احتياطية محلية: ${backupFile}`);
-        
-        // رفع إلى Google Drive (إذا كان مفعّلاً)
-        if (driveService && GOOGLE_DRIVE_FOLDER_ID) {
-            uploadToGoogleDrive(backupFile, `data_${timestamp}.json`).catch(console.error);
-        }
-        
-        // تنظيف النسخ المحلية القديمة (احتفظ بآخر 20)
-        const files = fs.readdirSync(backupDir)
-            .filter(f => f.startsWith('data_') && f.endsWith('.json'))
-            .sort();
-        if (files.length > 20) {
-            const toDelete = files.slice(0, files.length - 20);
-            toDelete.forEach(f => {
-                fs.unlinkSync(path.join(backupDir, f));
-                console.log(`🗑️ تم حذف نسخة محلية قديمة: ${f}`);
-            });
-        }
-        return backupFile;
-    } catch (error) {
-        console.error('❌ فشل إنشاء النسخة الاحتياطية:', error);
-        return null;
-    }
-}
-
-// ============================================================
 // نقاط نهاية النسخ الاحتياطي (للمدير فقط)
 // ============================================================
 
@@ -401,6 +401,7 @@ app.get('/api/backup/latest-local', authMiddleware, (req, res) => {
 // نقاط نهاية المصادقة
 // ============================================================
 app.post('/api/auth/login', (req, res) => {
+    // نفس الكود السابق (لم يتغير)
     try {
         const { email, password } = req.body;
         const user = findUserByEmail(email);
@@ -434,6 +435,7 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.post('/api/auth/register', (req, res) => {
+    // نفس الكود السابق
     try {
         const { username, email, password } = req.body;
         if (!username || !email || !password) return res.status(400).json({ error: 'All fields required' });
@@ -497,7 +499,7 @@ app.post('/api/auth/logout', authMiddleware, (req, res) => {
 });
 
 // ============================================================
-// نقاط نهاية الأغاني
+// نقاط نهاية الأغاني (موجودة)
 // ============================================================
 function getUserSongs(userId) {
     return db.songs.filter(s => s.userId === userId);
@@ -1185,7 +1187,6 @@ app.post('/webhook', (req, res) => {
         let updatedCount = 0;
 
         clips.forEach((clip, index) => {
-            // استخراج جميع الحقول الممكنة
             const audioUrl = clip.audio_url || clip.audioUrl || clip.url || null;
             const videoUrl = clip.video_url || clip.videoUrl || null;
             const wavUrl = clip.wav_url || clip.wavUrl || null;
@@ -1262,7 +1263,6 @@ app.post('/webhook', (req, res) => {
                     console.log(`✅ تم تحديث الأغنية: ${existingSong.title} (${existingSong.id})`);
                 }
             } else {
-                // إنشاء أغنية جديدة مع جميع الحقول
                 const song = {
                     id: 'song-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex'),
                     userId: userId,
